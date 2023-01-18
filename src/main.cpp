@@ -3,8 +3,13 @@
 #include <Adafruit_GFX.h>
 #include <TFT_eSPI.h>
 
+#undef NETWORKING
+
 #ifdef NETWORKING
-#include <WifiManager.h>
+#include <WiFi.h>
+//#include <WiFiClient.h>
+//#include <ESPmDNS.h>
+//#include <WiFiUdp.h>
 #include <PubSubClient.h>
 #endif
 //#include "free_fonts.h"
@@ -20,7 +25,22 @@
 
 #define FINE_SCAN true
 
+#ifdef NETWORKING
+#define SSID "OpenHAB"
+#define WIFIPASSWORD "$OpenHAB123" 
+/* WiFi Settings */
+const char* ssid     = SSID;
+const char* password = WIFIPASSWORD;
+String basetopic = "/openhab/in/";
+
+IPAddress broker(192,168,1,1);          // Address of the MQTT broker
+WiFiClient wificlient;
+PubSubClient client(wificlient);
+#endif
+
 bool DEBUG = false;
+long espID;
+char client_id[20];
 
 // Create object "tft"
 TFT_eSPI display = TFT_eSPI();
@@ -326,6 +346,40 @@ void IRAM_ATTR toggleButton2() {
   displaySensor(num);
 }
 
+#ifdef NETWORKING
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  char spayload[length];
+  memcpy(spayload, payload, length);
+  spayload[length] = '\0';
+  //char topicfilter[50] = "";
+  if (DEBUG) {
+    Serial.print("Message arrived [");
+    Serial.print(topic);
+    Serial.print("] ");
+    Serial.println(spayload);
+    Serial.println();
+  }
+}
+
+void mqttReconnect() {
+  // Loop until we're reconnected
+  while (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    // Attempt to connect
+    if (client.connect(client_id)) {
+      Serial.println("connected..");
+      //client.subscribe(readtopic);
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      // Wait 5 seconds before retrying
+      delay(5000);
+    }
+  }
+}
+#endif
+
 void setup() {
   pinMode(BUTTON1PIN, INPUT);
   pinMode(BUTTON2PIN, INPUT);
@@ -355,36 +409,79 @@ void setup() {
   pBLEScan->setWindow(30);
   pBLEScan->setActiveScan(true);
   display.println("Searching Sensors");
+
+  #ifdef NETWORKING
+  espID = 12345;
+  snprintf(client_id,20,"client-%li", espID);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  Serial.println("WiFi begun");
+  Serial.print("Connecting to ");
+  Serial.print(ssid);
+  Serial.println("...");
+
+  if (WiFi.waitForConnectResult() != WL_CONNECTED) {
+    Serial.println("WiFi Connection Failed!");
+  } else {
+    Serial.println("Ready");
+    Serial.print("IP address: ");
+    Serial.println(WiFi.localIP());
+  }
+
+  /* Prepare MQTT client */
+  client.setServer(broker, 1883);
+  client.setCallback(mqttCallback);
+  #endif
 }
 
 void loop() {
+  // Scan for Sensors
   Serial.println("Start Scanning...");
-
-  /* Async Scanning
-  pBLEScan->start(0, nullptr, false); // Non Blocking Scan
-  
-  unsigned long start = millis();
-  while (millis() - start < 60000) {
-
-  }
-  pBLEScan->stop();
-  */
-
-  pBLEScan->start(60); // Blocking Scab
+  pBLEScan->start(60); // Blocking Scan
   Serial.println("Stop Scanning...");
   delay(10);
   
+  // Publsh Sensor Values to MQTT
   #ifdef NETWORKING
-  String topic;
-  for (tempSensor t : sensors) {
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    Serial.print("Connecting to ");
+    Serial.print(ssid);
+    Serial.println("...");
+    WiFi.begin(ssid, password);
 
-    topic = basetopic + t.mac + "/temp/state"
-
-    client.publish(topic,t.temp,true);
-
+    if (WiFi.waitForConnectResult() != WL_CONNECTED) {
+      Serial.println("WiFi Connection failed!");
+    } else {
+      Serial.println("WiFi connected");
+    }
   }
- 
 
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!client.connected()) {
+      mqttReconnect();
+    } else {
+      client.loop();
+      String topic;
+      String msg;
+      String mac;
+      for (tempSensor t : sensors) {
+        mac = t.mac.c_str();
+        topic = basetopic + mac + "_temp/state";
+        msg = (String)t.temp;
+        client.publish(topic.c_str(),msg.c_str(),true);
+        topic = basetopic + mac + "_hum/state";
+        msg = (String)t.hum;
+        client.publish(topic.c_str(),msg.c_str(),true);
+        topic = basetopic + mac + "_bat/state";
+        msg = (String)t.bat;
+        client.publish(topic.c_str(),msg.c_str(),true);
+        topic = basetopic + mac + "_battype/state";
+        msg = (String)t.battype;
+        client.publish(topic.c_str(),msg.c_str(),true);
+      }
+    }
+  }
   #endif
 
 }
