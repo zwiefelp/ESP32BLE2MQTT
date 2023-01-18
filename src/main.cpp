@@ -2,6 +2,11 @@
 #include "BLEDevice.h"
 #include <Adafruit_GFX.h>
 #include <TFT_eSPI.h>
+
+#ifdef NETWORKING
+#include <WifiManager.h>
+#include <PubSubClient.h>
+#endif
 //#include "free_fonts.h"
 
 #define BUTTON1PIN 35
@@ -369,6 +374,17 @@ void loop() {
   Serial.println("Stop Scanning...");
   delay(10);
   
-  // Push Data to Data Logging Service
+  #ifdef NETWORKING
+  String topic;
+  for (tempSensor t : sensors) {
+
+    topic = basetopic + t.mac + "/temp/state"
+
+    client.publish(topic,t.temp,true);
+
+  }
+ 
+
+  #endif
 
 }
