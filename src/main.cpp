@@ -26,14 +26,7 @@
 
 #define FINE_SCAN true
 
-#ifdef WIFI
-/* WiFi Settings */
-#define SSID "OpenHAB"
-#define WIFIPASSWORD "$OpenHAB123" 
-
-const char* ssid     = SSID;
-const char* password = WIFIPASSWORD;
-
+// WiFi Icon
 const unsigned char wifiicon[] PROGMEM  = {
 	0b00000000, 0b00000000, //                 
 	0b00000111, 0b11100000, //      ######     
@@ -52,19 +45,20 @@ const unsigned char wifiicon[] PROGMEM  = {
 	0b00000000, 0b00000000, //                 
 	0b00000000, 0b00000000, //                 
 };
-#endif
 
 #ifdef MQTT
 String basetopic = "/openhab/in/";
+String conftopic = "/openhab/configuration/";
 
-IPAddress broker(192,168,20,17);          // Address of the MQTT broker
+IPAddress broker_int(192,168,20,17);          // Address of the MQTT broker
+IPAddress broker_ext(82,165,176,152);          // Address of the MQTT broker
 WiFiClient wificlient;
 PubSubClient client(wificlient);
 #endif
 
 bool DEBUG = false;
-long espID;
-char client_id[20];
+u_int64_t espID;
+char client_id[40];
 
 // Create object "tft"
 TFT_eSPI display = TFT_eSPI();
@@ -421,7 +415,9 @@ void mqttReconnect() {
     // Attempt to connect
     if (client.connect(client_id)) {
       Serial.println("connected..");
-      //client.subscribe(readtopic);
+      client.subscribe(conftopic.c_str());
+      String msg = "Online IP=" + WiFi.localIP().toString();
+      client.publish(conftopic.c_str(),msg.c_str(),true);
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
@@ -459,13 +455,13 @@ void setup() {
   pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks(), FINE_SCAN);
   pBLEScan->setWindow(30);
   pBLEScan->setActiveScan(true);
-  
 
   #ifdef WIFI
   //WiFiManager, Local intialization. Once its business is done, there is no need to keep it around
   WiFiManager wm;
   espID = ESP.getEfuseMac();
-  snprintf(client_id,20,"client-%li", espID);
+  snprintf(client_id,40,"ble2mqtt-%li", espID);
+  conftopic = conftopic + "ble2mqtt-" + espID;
   WiFi.mode(WIFI_STA);
 
   display.println("Connect to WIFI...");
@@ -498,8 +494,9 @@ void setup() {
   #endif
   #ifdef MQTT
   /* Prepare MQTT client */
-  client.setServer(broker, 1883);
+  client.setServer(broker_ext, 1883);
   client.setCallback(mqttCallback);
+  mqttReconnect();
   #endif
 
   display.println("Searching Sensors");
@@ -512,7 +509,6 @@ void loop() {
   Serial.println("Start Scanning...");
   pBLEScan->start(60); // Blocking Scan
   Serial.println("Stop Scanning...");
-  delay(10);
   
   // Publsh Sensor Values to MQTT
   #ifdef WIFI
@@ -541,20 +537,21 @@ void loop() {
     } 
 
     if (client.connected()) {
-      client.loop();
       String topic;
       String msg;
       String dev;
+
+      client.loop();
+
       for (tempSensor t : sensors) {
         Serial.print("Publish Sensor: ");
         Serial.print(t.mac.c_str());
         
         dev = (t.mac.substr(0,2) + t.mac.substr(3,2) + t.mac.substr(6,2) + t.mac.substr(9,2) + t.mac.substr(12,2) + t.mac.substr(15,2)).c_str();
-        topic = basetopic + dev + "_temp/state";
-        
         Serial.print(" => ");
         Serial.println(basetopic + dev);
 
+        topic = basetopic + dev + "_temp/state";
         msg = (String)t.temp;
         client.publish(topic.c_str(),msg.c_str(),true);
         topic = basetopic + dev + "_hum/state";
@@ -566,7 +563,17 @@ void loop() {
         topic = basetopic + dev + "_battype/state";
         msg = (String)t.battype;
         client.publish(topic.c_str(),msg.c_str(),true);
+        topic = basetopic + dev + "_type/state";
+        msg = t.type.c_str();
+        client.publish(topic.c_str(),msg.c_str(),true);
+        topic = basetopic + dev + "_rssi/state";
+        msg = (String)t.rssi;
+        client.publish(topic.c_str(),msg.c_str(),true);
       }
+
+      client.loop();
+      delay(5);
+      client.disconnect();
     }
   }
 
