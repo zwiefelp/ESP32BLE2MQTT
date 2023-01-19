@@ -464,7 +464,7 @@ void setup() {
   #ifdef WIFI
   //WiFiManager, Local intialization. Once its business is done, there is no need to keep it around
   WiFiManager wm;
-  espID = 12345;
+  espID = ESP.getEfuseMac();
   snprintf(client_id,20,"client-%li", espID);
   WiFi.mode(WIFI_STA);
 
