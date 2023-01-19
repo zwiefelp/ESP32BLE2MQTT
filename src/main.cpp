@@ -339,22 +339,41 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
     if (mac.substr(0,8) == GOVEE_BT_mac_OUI_PREFIX && data.length() > 15 ) { //data.lengh() == 17 ??
       Serial.print("Govee H5075 Data Received: ");
       Serial.println(mac.c_str());
+
+      u_int8_t *payload = advertisedDevice.getPayload();
+      int plength = advertisedDevice.getPayloadLength();
+      char spayload[plength];
+      memcpy(spayload, payload, plength);
+      
+      if (DEBUG) {
+        Serial.print("Raw Data, length=");
+        Serial.println(data.size());
+        Serial.println(string_to_hex(data).c_str());
+        Serial.printf("Payload length=%d, ", plength);
+        spayload[25] = '\48';
+        spayload[plength] = '\0';
+        Serial.println("Payload Raw: ");
+        Serial.println(spayload);
+        Serial.println("Payload Hex:");
+        Serial.println(string_to_hex(spayload).c_str());
+      }
       Serial.print("Manufacturer Key: ");
       Serial.println(string_to_hex(data.substr(2,2)).c_str());
 
       // Ist das Paket, die payload 10 Byte lang oder 17 byte ??
-      //                      09:ff:88:ec:00:03:32:9c:64:00 (value = 5,6,7 und bat = 8)
-      // 03:03:88:ec:02:01:05:09:ff:88:ec:00:03:32:9c:64:00 (value = 12,13,14 und bat = 15)
+      //                                                                09:ff:88:ec:00:03:32:9c:64:00 (value = 5,6,7 und bat = 8)
+      //                                           03:03:88:ec:02:01:05:09:ff:88:ec:00:03:32:9c:64:00 (value = 12,13,14 und bat = 15)
+      // 0D:09:47:56:48:35:30:37:35:5F:33:32:37:37:03:03:88:EC:02:01:05:09:FF:88:EC:38:03:46:0B:64: (58)
 
-      u_int32_t value = data[12] * 65535 + data[13] * 256 + data[14];
+      u_int32_t value = spayload[26] * 65535 + spayload[27] * 256 + spayload[28];
       
       if (value & 0x800000) {
-        temp = double((value ^ 0x800000) / -10000);
+        temp = (double)(value ^ 0x800000) / -10000.0;
       } else {
-        temp = double(value / 10000);
+        temp = (double)value / 10000.0;
       }
-      hum = double(value % 1000) / 10;
-      bat = double(data[15]);
+      hum = (double)(value % 1000) / 10.0;
+      bat = (double)spayload[29];
       battype = BAT_PERCENT;
 
       t = getSensor(mac);
