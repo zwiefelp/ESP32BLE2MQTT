@@ -1,15 +1,16 @@
 #include <list>
 #include "BLEDevice.h"
-#include <Adafruit_GFX.h>
 #include <TFT_eSPI.h>
+#include <WiFiManager.h>
 
-#undef NETWORKING
+#define WIFI
+#define MQTT
 
-#ifdef NETWORKING
+#ifdef WIFI
 #include <WiFi.h>
-//#include <WiFiClient.h>
-//#include <ESPmDNS.h>
-//#include <WiFiUdp.h>
+#endif
+
+#ifdef MQTT
 #include <PubSubClient.h>
 #endif
 //#include "free_fonts.h"
@@ -25,15 +26,38 @@
 
 #define FINE_SCAN true
 
-#ifdef NETWORKING
+#ifdef WIFI
+/* WiFi Settings */
 #define SSID "OpenHAB"
 #define WIFIPASSWORD "$OpenHAB123" 
-/* WiFi Settings */
+
 const char* ssid     = SSID;
 const char* password = WIFIPASSWORD;
+
+const unsigned char wifiicon[] PROGMEM  = {
+	0b00000000, 0b00000000, //                 
+	0b00000111, 0b11100000, //      ######     
+	0b00011111, 0b11111000, //    ##########   
+	0b00111111, 0b11111100, //   ############  
+	0b01110000, 0b00001110, //  ###        ### 
+	0b01100111, 0b11100110, //  ##  ######  ## 
+	0b00001111, 0b11110000, //     ########    
+	0b00011000, 0b00011000, //    ##      ##   
+	0b00000011, 0b11000000, //       ####      
+	0b00000111, 0b11100000, //      ######     
+	0b00000100, 0b00100000, //      #    #     
+	0b00000001, 0b10000000, //        ##       
+	0b00000001, 0b10000000, //        ##       
+	0b00000000, 0b00000000, //                 
+	0b00000000, 0b00000000, //                 
+	0b00000000, 0b00000000, //                 
+};
+#endif
+
+#ifdef MQTT
 String basetopic = "/openhab/in/";
 
-IPAddress broker(192,168,1,1);          // Address of the MQTT broker
+IPAddress broker(192,168,20,17);          // Address of the MQTT broker
 WiFiClient wificlient;
 PubSubClient client(wificlient);
 #endif
@@ -133,6 +157,35 @@ void displayScreen(tempSensor t) {
     }
   }
 
+  //display WiFI & MQTT Connection
+  u_int16_t col = TFT_WHITE;
+  #ifdef WIFI
+  if (WiFi.status() == WL_CONNECTED) {
+    col = TFT_GREEN;
+  } else {
+    col = TFT_RED;
+  }
+  #endif 
+  /*
+  display.setTextFont(4);
+  display.setTextColor(col, TFT_BLACK);
+  display.setCursor(240 - 60, y);
+  display.print("W");
+  */
+  display.drawBitmap(240 - 50, y+2, wifiicon,16,16,col);
+  
+  display.setTextColor(TFT_WHITE, TFT_BLACK);
+  display.setTextFont(2);
+  #ifdef MQTT
+  if (client.connected()) {
+    display.setTextColor(TFT_GREEN, TFT_BLACK);
+  } else {
+    display.setTextColor(TFT_RED, TFT_BLACK);
+  }
+  #endif 
+  display.setCursor(240 - 20, y);
+  display.print("MQ");
+
   // display device
   x=0;
   y=22;
@@ -147,7 +200,7 @@ void displayScreen(tempSensor t) {
   display.print(t.mac.c_str());
 
   // display temperature
-  y=y+d+7;  
+  y=y+d+9;  
   display.setTextColor(TFT_ORANGE, TFT_BLACK);
   display.setCursor(x,y);
   display.setTextSize(1);
@@ -346,7 +399,7 @@ void IRAM_ATTR toggleButton2() {
   displaySensor(num);
 }
 
-#ifdef NETWORKING
+#ifdef MQTT
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
   char spayload[length];
   memcpy(spayload, payload, length);
@@ -383,18 +436,16 @@ void mqttReconnect() {
 void setup() {
   pinMode(BUTTON1PIN, INPUT);
   pinMode(BUTTON2PIN, INPUT);
-  attachInterrupt(BUTTON1PIN, toggleButton1, RISING);
-  attachInterrupt(BUTTON2PIN, toggleButton2, RISING);
 
   display.init();
   display.setRotation(1);
   display.fillScreen(TFT_BLACK);
 
   display.setTextSize(1);
-  display.setTextFont(4);
+  display.setTextFont(2);
   display.setTextColor(TFT_WHITE,0);
-  display.setCursor(0,25);
-  display.print("BLE2MQTT starting...");
+  display.setCursor(0,0);
+  display.println("BLE2MQTT starting...");
   
   //Start serial communication
   Serial.begin(115200);
@@ -408,30 +459,52 @@ void setup() {
   pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks(), FINE_SCAN);
   pBLEScan->setWindow(30);
   pBLEScan->setActiveScan(true);
-  display.println("Searching Sensors");
+  
 
-  #ifdef NETWORKING
+  #ifdef WIFI
+  //WiFiManager, Local intialization. Once its business is done, there is no need to keep it around
+  WiFiManager wm;
   espID = 12345;
   snprintf(client_id,20,"client-%li", espID);
   WiFi.mode(WIFI_STA);
+
+  display.println("Connect to WIFI...");
+  bool res;
+  wm.setConnectTimeout(10);
+  res = wm.autoConnect("BLE2MQTT","password");
+  if (!res) {
+    Serial.println("Failed to connect to WiFi!");
+  }
+
+  /*
   WiFi.begin(ssid, password);
   Serial.println("WiFi begun");
   Serial.print("Connecting to ");
   Serial.print(ssid);
   Serial.println("...");
-
-  if (WiFi.waitForConnectResult() != WL_CONNECTED) {
-    Serial.println("WiFi Connection Failed!");
-  } else {
+  display.println("Connect WIFI...");
+  WiFi.waitForConnectResult();
+  */
+ 
+  if (WiFi.status() == WL_CONNECTED) {
     Serial.println("Ready");
     Serial.print("IP address: ");
     Serial.println(WiFi.localIP());
+    display.print("Cconnected! IP=");
+    display.println(WiFi.localIP());
+  } else {
+    Serial.println("WiFi Connection Failed!");
   }
-
+  #endif
+  #ifdef MQTT
   /* Prepare MQTT client */
   client.setServer(broker, 1883);
   client.setCallback(mqttCallback);
   #endif
+
+  display.println("Searching Sensors");
+  attachInterrupt(BUTTON1PIN, toggleButton1, RISING);
+  attachInterrupt(BUTTON2PIN, toggleButton2, RISING);
 }
 
 void loop() {
@@ -442,46 +515,61 @@ void loop() {
   delay(10);
   
   // Publsh Sensor Values to MQTT
-  #ifdef NETWORKING
+  #ifdef WIFI
+  /*
   if (WiFi.status() != WL_CONNECTED)
   {
     Serial.print("Connecting to ");
     Serial.print(ssid);
     Serial.println("...");
     WiFi.begin(ssid, password);
+    WiFi.waitForConnectResult();
 
-    if (WiFi.waitForConnectResult() != WL_CONNECTED) {
+    if (WiFi.status() != WL_CONNECTED) {
       Serial.println("WiFi Connection failed!");
     } else {
       Serial.println("WiFi connected");
     }
   }
+  */
+  #endif
 
+  #ifdef MQTT
   if (WiFi.status() == WL_CONNECTED) {
     if (!client.connected()) {
       mqttReconnect();
-    } else {
+    } 
+
+    if (client.connected()) {
       client.loop();
       String topic;
       String msg;
-      String mac;
+      String dev;
       for (tempSensor t : sensors) {
-        mac = t.mac.c_str();
-        topic = basetopic + mac + "_temp/state";
+        Serial.print("Publish Sensor: ");
+        Serial.print(t.mac.c_str());
+        
+        dev = (t.mac.substr(0,2) + t.mac.substr(3,2) + t.mac.substr(6,2) + t.mac.substr(9,2) + t.mac.substr(12,2) + t.mac.substr(15,2)).c_str();
+        topic = basetopic + dev + "_temp/state";
+        
+        Serial.print(" => ");
+        Serial.println(basetopic + dev);
+
         msg = (String)t.temp;
         client.publish(topic.c_str(),msg.c_str(),true);
-        topic = basetopic + mac + "_hum/state";
+        topic = basetopic + dev + "_hum/state";
         msg = (String)t.hum;
         client.publish(topic.c_str(),msg.c_str(),true);
-        topic = basetopic + mac + "_bat/state";
+        topic = basetopic + dev + "_bat/state";
         msg = (String)t.bat;
         client.publish(topic.c_str(),msg.c_str(),true);
-        topic = basetopic + mac + "_battype/state";
+        topic = basetopic + dev + "_battype/state";
         msg = (String)t.battype;
         client.publish(topic.c_str(),msg.c_str(),true);
       }
     }
   }
+
   #endif
 
 }
