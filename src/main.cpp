@@ -5,6 +5,7 @@
 
 #define WIFI
 #define MQTT
+#undef MQTTDEBUG
 
 #ifdef WIFI
 #include <WiFi.h>
@@ -56,9 +57,11 @@ WiFiClient wificlient;
 PubSubClient client(wificlient);
 #endif
 
+int MQ_COLOR = TFT_WHITE;
+
 bool DEBUG = false;
 u_int64_t espID;
-char client_id[40];
+String client_id;
 
 // Create object "tft"
 TFT_eSPI display = TFT_eSPI();
@@ -72,6 +75,7 @@ int num = 1;
 struct tempSensor {
   std::string mac;
   std::string type;
+  std::string name;
   double temp;
   double hum;
   double bat;
@@ -118,7 +122,7 @@ tempSensor getSensor(int n) {
   }
 }
 
-void setSensor(std::string mac, std::string type, double temp, double hum, double bat, int rssi, int battype) {
+void setSensor(std::string mac, std::string type, double temp, double hum, double bat, int rssi, int battype, std::string name) {
   for (auto it = sensors.rbegin(); it != sensors.rend(); it++) {
     if (it->mac == mac) {
       it->type = type;
@@ -127,9 +131,33 @@ void setSensor(std::string mac, std::string type, double temp, double hum, doubl
       it->bat = bat;
       it->rssi = rssi;
       it->battype = battype;
+      it->name = name;
       return;
     }
   }
+}
+
+void display_indicators() {
+  //display WiFI & MQTT Connection
+  u_int16_t col = TFT_WHITE;
+  #ifdef WIFI
+  if (WiFi.status() == WL_CONNECTED) {
+    col = TFT_GREEN;
+  } else {
+    col = TFT_RED;
+  }
+  #endif 
+  display.drawBitmap(240 - 50, 2, wifiicon,16,16,col);
+  display.setTextColor(MQ_COLOR, TFT_BLACK);
+  display.setTextFont(2);
+  display.setCursor(240 - 20, 0);
+  display.print("MQ");
+  display.setTextColor(TFT_WHITE);
+}
+
+void display_indicators(int col) {
+  MQ_COLOR = col;
+  display_indicators();
 }
 
 //function that prints the latest sensor readings in the OLED display
@@ -151,34 +179,7 @@ void displayScreen(tempSensor t) {
     }
   }
 
-  //display WiFI & MQTT Connection
-  u_int16_t col = TFT_WHITE;
-  #ifdef WIFI
-  if (WiFi.status() == WL_CONNECTED) {
-    col = TFT_GREEN;
-  } else {
-    col = TFT_RED;
-  }
-  #endif 
-  /*
-  display.setTextFont(4);
-  display.setTextColor(col, TFT_BLACK);
-  display.setCursor(240 - 60, y);
-  display.print("W");
-  */
-  display.drawBitmap(240 - 50, y+2, wifiicon,16,16,col);
-  
-  display.setTextColor(TFT_WHITE, TFT_BLACK);
-  display.setTextFont(2);
-  #ifdef MQTT
-  if (client.connected()) {
-    display.setTextColor(TFT_GREEN, TFT_BLACK);
-  } else {
-    display.setTextColor(TFT_RED, TFT_BLACK);
-  }
-  #endif 
-  display.setCursor(240 - 20, y);
-  display.print("MQ");
+  display_indicators();
 
   // display device
   x=0;
@@ -201,9 +202,15 @@ void displayScreen(tempSensor t) {
   display.setTextFont(6);
   display.print(int(t.temp));
   display.setTextFont(4);
-  display.printf(".%02u°C",int((t.temp - int(t.temp))*100));
-  //display.write(167);
 
+  // Set Precision
+  int value = int((t.temp - int(t.temp))*100);
+  if ( t.type == "ThermoBeacon") {
+    display.printf(".%02u°C",value);
+  } else {
+    display.printf(".%01u°C",value);
+  }
+  
   //display humidity 
   x=x+130;
   display.setTextColor(TFT_SKYBLUE, TFT_BLACK);
@@ -258,8 +265,10 @@ void displaySensor(int i ){
   displayScreen(getSensor(i));
 }
 
-void printReadings(double temp, double hum, double bat, int rssi, int battype) {
-  Serial.print("Temperature:");
+void printReadings(double temp, double hum, double bat, int rssi, int battype, std::__cxx11::string name) {
+  Serial.print("Name:");
+  Serial.print(name.c_str());
+  Serial.print(" Temperature:");
   Serial.print(temp);
   Serial.print("C");
   Serial.print(" Humidity:");
@@ -286,17 +295,17 @@ void printReadings(double temp, double hum, double bat, int rssi, int battype) {
 //Callback function that gets called, when another device's advertisement has been received
 class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
   void onResult(BLEAdvertisedDevice advertisedDevice) {
-    std::string mac;
     tempSensor t;
     double temp;
     double hum;
     double bat;
-    int rssi;
     int battype;
 
-    rssi = advertisedDevice.getRSSI();
-    mac = advertisedDevice.getAddress().toString();
+    int rssi = advertisedDevice.getRSSI();
+    std::__cxx11::string mac = advertisedDevice.getAddress().toString();
+    std::__cxx11::string name = advertisedDevice.getName();
     std::__cxx11::string data = advertisedDevice.getManufacturerData();
+
     if (DEBUG) {
       Serial.print("Found Device Advertisement. Manufacturer=");
       Serial.print(mac.substr(0,8).c_str());
@@ -318,14 +327,21 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
           Serial.print("Found New Sensor! Type=ThermoBeacon count=");
           Serial.println(sensors.size());
         }
+        
+        int16_t btemp = data[12] + 256 * data[13];
+        double ntemp = (double)btemp / 16;
+
+        Serial.print("New Temperature=");
+        Serial.println(ntemp);
 
         temp = ((double)data[12] + 256 * (double)data[13]) / 16;
+        if (temp > 4000) temp = temp - 4096;         
         hum = ((double)data[14] + 256 * (double)data[15]) / 16;
         bat = ((double)data[10] + 256 *(double)data[11]) / 1000;
         battype = BAT_VOLT;
 
-        setSensor(mac,"ThermoBeacon",temp,hum,bat,rssi,battype);
-        printReadings(temp,hum,bat,rssi,battype);
+        setSensor(mac,"ThermoBeacon",temp,hum,bat,rssi,battype,name);
+        printReadings(temp,hum,bat,rssi,battype,name);
 
         if (t.type == "new" || t.num == num) {
           displaySensor(mac);
@@ -350,23 +366,25 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
         Serial.println(data.size());
         Serial.println(string_to_hex(data).c_str());
         Serial.printf("Payload length=%d, ", plength);
-        spayload[25] = '\48';
+        spayload[25] = 0x38;
         spayload[plength] = '\0';
         Serial.println("Payload Raw: ");
         Serial.println(spayload);
         Serial.println("Payload Hex:");
         Serial.println(string_to_hex(spayload).c_str());
+        Serial.print("Manufacturer Key: ");
+        Serial.println(string_to_hex(string_to_hex(spayload).substr(69,5)).c_str());
       }
-      Serial.print("Manufacturer Key: ");
-      Serial.println(string_to_hex(data.substr(2,2)).c_str());
 
       // Ist das Paket, die payload 10 Byte lang oder 17 byte ??
       //                                                                09:ff:88:ec:00:03:32:9c:64:00 (value = 5,6,7 und bat = 8)
       //                                           03:03:88:ec:02:01:05:09:ff:88:ec:00:03:32:9c:64:00 (value = 12,13,14 und bat = 15)
       // 0D:09:47:56:48:35:30:37:35:5F:33:32:37:37:03:03:88:EC:02:01:05:09:FF:88:EC:38:03:46:0B:64: (58)
+      // 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30
 
       u_int32_t value = spayload[26] * 65535 + spayload[27] * 256 + spayload[28];
-      
+
+      // Precision für %.1f für temp und hum
       if (value & 0x800000) {
         temp = (double)(value ^ 0x800000) / -10000.0;
       } else {
@@ -382,8 +400,8 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
         Serial.println(sensors.size());
       }
 
-      setSensor(mac,"Govee H5075",temp,hum,bat,rssi,battype);
-      printReadings(temp,hum,bat,rssi,battype);
+      setSensor(mac,"Govee H5075",temp,hum,bat,rssi,battype,name);
+      printReadings(temp,hum,bat,rssi,battype,name);
 
       if (t.type == "new" || t.num == num) {
         displaySensor(mac);
@@ -418,57 +436,81 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   memcpy(spayload, payload, length);
   spayload[length] = '\0';
   //char topicfilter[50] = "";
-  if (DEBUG) {
+  #ifdef MQTTDEBUG
     Serial.print("Message arrived [");
     Serial.print(topic);
     Serial.print("] ");
     Serial.println(spayload);
     Serial.println();
-  }
+  #endif
 }
 
 void mqttReconnect() {
+  // Set MQ Indikator
   // Loop until we're reconnected
-  while (!client.connected()) {
+  display_indicators(TFT_RED);
+
+  if (!client.connected()) {
     Serial.print("Attempting MQTT connection...");
     // Attempt to connect
-    if (client.connect(client_id)) {
+    if (client.connect(client_id.c_str())) {
+      display_indicators(TFT_GREEN);
       Serial.println("connected..");
       client.subscribe(conftopic.c_str());
       String msg = "Online IP=" + WiFi.localIP().toString();
       client.publish(conftopic.c_str(),msg.c_str(),true);
+      display_indicators(TFT_DARKGREY);
     } else {
+      display_indicators(TFT_RED);
       Serial.print("failed, rc=");
       Serial.print(client.state());
       Serial.println(" try again in 5 seconds");
-      // Wait 5 seconds before retrying
-      delay(5000);
+      // Wait 5 seconds before retrying>
     }
   }
+
 }
 #endif
 
+String mac2String(byte ar[]) {
+  String s;
+  for (byte i = 0; i < 6; ++i)
+  {
+    char buf[3];
+    sprintf(buf, "%02X", ar[i]); // J-M-L: slight modification, added the 0 in the format for padding 
+    s += buf;
+    //if (i < 5) s += ':';
+  }
+  return s;
+}
+
 void setup() {
-  pinMode(BUTTON1PIN, INPUT);
-  pinMode(BUTTON2PIN, INPUT);
-
-  display.init();
-  display.setRotation(1);
-  display.fillScreen(TFT_BLACK);
-
-  display.setTextSize(1);
-  display.setTextFont(2);
-  display.setTextColor(TFT_WHITE,0);
-  display.setCursor(0,0);
-  display.println("BLE2MQTT starting...");
-  
   //Start serial communication
   Serial.begin(115200);
   Serial.println("BLE2MQTT starting...");
 
+  display.init();
+  display.setRotation(1);
+  display.setTextSize(1);
+  display.setTextFont(4);
+
+  //Welcome Messager
+  display.fillScreen(TFT_WHITE);
+  display.setTextColor(TFT_BLACK,TFT_WHITE);
+  display.setCursor(0,25);
+  display.println("BLE2MQTT starting...");
+  display.println("");
+  display.println("         UrsiUrsiUrsi");
+  delay(2000);
+
+  display.fillScreen(TFT_BLACK);
+  display.setTextColor(TFT_WHITE,TFT_BLACK);
+  display.setTextFont(2);
+  display.setCursor(0,16);
+
+  Serial.println("Init BLE Device...");
   //Init BLE device
   BLEDevice::init("");
- 
   pBLEScan = BLEDevice::getScan();
   pBLEScan->setInterval(80);
   pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks(), FINE_SCAN);
@@ -476,30 +518,22 @@ void setup() {
   pBLEScan->setActiveScan(true);
 
   #ifdef WIFI
+  Serial.println("Connect to WiFi...");
   //WiFiManager, Local intialization. Once its business is done, there is no need to keep it around
   WiFiManager wm;
   espID = ESP.getEfuseMac();
-  snprintf(client_id,40,"ble2mqtt-%li", espID);
-  conftopic = conftopic + "ble2mqtt-" + espID;
-  WiFi.mode(WIFI_STA);
-
+  client_id = "ble2mqtt-" + mac2String((byte*) &espID);
+  conftopic = conftopic + client_id;
+  
   display.println("Connect to WIFI...");
+  WiFi.mode(WIFI_STA);   
+
   bool res;
   wm.setConnectTimeout(10);
   res = wm.autoConnect("BLE2MQTT","password");
   if (!res) {
     Serial.println("Failed to connect to WiFi!");
   }
-
-  /*
-  WiFi.begin(ssid, password);
-  Serial.println("WiFi begun");
-  Serial.print("Connecting to ");
-  Serial.print(ssid);
-  Serial.println("...");
-  display.println("Connect WIFI...");
-  WiFi.waitForConnectResult();
-  */
  
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("Ready");
@@ -511,6 +545,9 @@ void setup() {
     Serial.println("WiFi Connection Failed!");
   }
   #endif
+
+  display.println("Searching Sensors");
+
   #ifdef MQTT
   /* Prepare MQTT client */
   client.setServer(broker_ext, 1883);
@@ -518,7 +555,8 @@ void setup() {
   mqttReconnect();
   #endif
 
-  display.println("Searching Sensors");
+  pinMode(BUTTON1PIN, INPUT);
+  pinMode(BUTTON2PIN, INPUT);
   attachInterrupt(BUTTON1PIN, toggleButton1, RISING);
   attachInterrupt(BUTTON2PIN, toggleButton2, RISING);
 }
@@ -554,11 +592,14 @@ void loop() {
     if (!client.connected()) {
       mqttReconnect();
     } 
-
+    // MQ Indikator anhand der Aktivität ändern
+    
     if (client.connected()) {
       String topic;
       String msg;
       String dev;
+
+      display_indicators(TFT_GREEN);
 
       client.loop();
 
@@ -588,11 +629,17 @@ void loop() {
         topic = basetopic + dev + "_rssi/state";
         msg = (String)t.rssi;
         client.publish(topic.c_str(),msg.c_str(),true);
+        topic = basetopic + dev + "_name/state";
+        msg = t.name.c_str();
+        client.publish(topic.c_str(),msg.c_str(),true);
       }
 
       client.loop();
-      delay(5);
+      delay(1000);
+      Serial.println("Disconnect MQTT...");
+
       client.disconnect();
+      display_indicators(TFT_DARKGREY);
     }
   }
 
