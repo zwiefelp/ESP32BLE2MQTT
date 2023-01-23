@@ -62,6 +62,9 @@ WiFiClient wificlient;
 PubSubClient client(wificlient);
 #endif
 
+String mqttdate = "";
+String mqtttime = "";
+
 int MQ_COLOR = TFT_WHITE;
 
 
@@ -475,13 +478,12 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   }
 
   if (strcmp(topic,timetopic.c_str()) == 0) {
-    // Do Stuff
+    mqtttime = spayload;
   }
 
   if (strcmp(topic,datetopic.c_str()) == 0) {
-    // Do Stuff
+    mqttdate = spayload;
   }
-
 
 }
 
@@ -512,7 +514,6 @@ void mqttReconnect() {
       // Wait 5 seconds before retrying>
     }
   }
-
 }
 
 /**
@@ -697,6 +698,10 @@ void loop() {
         client.publish(topic.c_str(),msg.c_str(),true);
         topic = basetopic + dev + "_name/state";
         msg = t.name.c_str();
+        client.publish(topic.c_str(),msg.c_str(),true);
+        // Publish Update Date/Time to lastupdate Topic
+        topic = basetopic + dev + "_lastupdate/state";
+        msg = mqttdate + " " + mqtttime;
         client.publish(topic.c_str(),msg.c_str(),true);
       }
 
