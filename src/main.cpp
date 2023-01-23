@@ -15,7 +15,6 @@ String version = "V1.0";
 #ifdef MQTT
 #include <PubSubClient.h>
 #endif
-//#include "free_fonts.h"
 
 #define BUTTON1PIN 35
 #define BUTTON2PIN 0
@@ -79,6 +78,9 @@ BLEScan* pBLEScan;
 
 int num = 1;
 
+#define BAT_VOLT 0
+#define BAT_PERCENT 1
+
 // Sensor
 struct tempSensor {
   std::string mac;
@@ -90,12 +92,10 @@ struct tempSensor {
   int num;
   int rssi;
   int battype = 0; // 0=Volts, 1=Percent
+  String lastupdate = "";
 };
 
 std::list<tempSensor> sensors;
-
-#define BAT_VOLT 0
-#define BAT_PERCENT 1
 
 std::__cxx11::string string_to_hex(const std::__cxx11::string& input, int length = 0)
 {
@@ -153,6 +153,7 @@ void setSensor(std::string mac, std::string type, double temp, double hum, doubl
       it->bat = bat;
       it->rssi = rssi;
       it->battype = battype;
+      it->lastupdate = mqttdate+ + " " + mqtttime;
       return;
     }
   }
@@ -347,7 +348,10 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
       //Serial.print("Manufacturer Key: ");
       //Serial.println(string_to_hex(spayload, plength).substr(69,5).c_str());
     }
-
+    /*
+    *     ThermoBeacon
+    *
+    */
     if (name == "ThermoBeacon") { //Check if the name of the advertiser matches   
 
       if (data.length() == 20) {
@@ -385,6 +389,10 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
  
       }
     }
+    /*
+    *     Govee H5075
+    *
+    */
     if (mac.substr(0,8) == GOVEE_BT_mac_OUI_PREFIX && data.length() > 15 ) { //data.lengh() == 17 ??
       Serial.print("Govee H5075 Data Received: ");
       Serial.println(mac.c_str());
@@ -421,6 +429,10 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
         num = t.num;
       }
     }
+    /*
+    *     Victron SmartSolar?
+    *
+    */
     if (DEBUG) Serial.println("--------------------------------------------------------------------------");
   }
 };
@@ -454,7 +466,6 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   Serial.print(topic);
   Serial.print("] ");
   Serial.println(spayload);
-  //Serial.println();
 
   if (strcmp(topic,conftopic.c_str()) == 0) {
     // Do Stuff
@@ -489,7 +500,6 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
 void mqttReconnect() {
   // Set MQ Indikator
-  // Loop until we're reconnected
   display_indicators(TFT_RED);
 
   if (!client.connected()) {
@@ -510,8 +520,6 @@ void mqttReconnect() {
       display_indicators(TFT_RED);
       Serial.print("failed, rc=");
       Serial.print(client.state());
-      Serial.println(" try again in 5 seconds");
-      // Wait 5 seconds before retrying>
     }
   }
 }
@@ -622,9 +630,6 @@ void setup() {
 void loop() {
   // Scan for Sensors
   Serial.println("Start Scanning...");
-  
-  //pBLEScan->start(60); // Blocking Scan
-
   // non Blocking Scan
   pBLEScan->start(0,nullptr,false);
   u_long startmillis = millis();
@@ -633,25 +638,6 @@ void loop() {
   }
   pBLEScan->stop();
   Serial.println("Stop Scanning...");
-
-  #ifdef WIFI
-  /*
-  if (WiFi.status() != WL_CONNECTED)
-  {
-    Serial.print("Connecting to ");
-    Serial.print(ssid);
-    Serial.println("...");
-    WiFi.begin(ssid, password);
-    WiFi.waitForConnectResult();
-
-    if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("WiFi Connection failed!");
-    } else {
-      Serial.println("WiFi connected");
-    }
-  }
-  */
-  #endif
 
   // Publsh Sensor Values to MQTT
   #ifdef MQTT
@@ -667,8 +653,6 @@ void loop() {
       String dev;
 
       display_indicators(TFT_GREEN);
-
-      //client.loop();
 
       for (tempSensor t : sensors) {
         Serial.print("Publish Sensor: ");
@@ -699,17 +683,10 @@ void loop() {
         topic = basetopic + dev + "_name/state";
         msg = t.name.c_str();
         client.publish(topic.c_str(),msg.c_str(),true);
-        // Publish Update Date/Time to lastupdate Topic
         topic = basetopic + dev + "_lastupdate/state";
-        msg = mqttdate + " " + mqtttime;
+        msg = t.lastupdate;
         client.publish(topic.c_str(),msg.c_str(),true);
       }
-
-      //client.loop();
-      //delay(1000);
-      //Serial.println("Disconnect MQTT...");
-
-      //client.disconnect();
       display_indicators(TFT_DARKGREY);
     }
   }
