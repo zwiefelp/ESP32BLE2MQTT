@@ -633,7 +633,7 @@ void loop() {
   // non Blocking Scan
   pBLEScan->start(0,nullptr,false);
   u_long startmillis = millis();
-  while (millis() - startmillis < 60000) {
+  while (millis() - startmillis < 60000 && millis() > startmillis) {
     client.loop();
   }
   pBLEScan->stop();
