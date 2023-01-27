@@ -226,11 +226,13 @@ void displayScreen(tempSensor t) {
   display.setTextFont(4);
 
   // Set Precision
-  int value = int((t.temp - int(t.temp))*100);
+  int value = 0;
   if ( t.type == "ThermoBeacon") {
-    display.printf(".%02u°C",value);
+    value = int((t.temp - int(t.temp))*100);
+    display.printf(".%02uC",value);
   } else {
-    display.printf(".%01u°C",value);
+    value = int((t.temp - int(t.temp))*10);
+    display.printf(".%uC",value);
   }
   
   //display humidity 
@@ -633,7 +635,7 @@ void loop() {
   // non Blocking Scan
   pBLEScan->start(0,nullptr,false);
   u_long startmillis = millis();
-  while (millis() - startmillis < 60000 && millis() > startmillis) {
+  while (millis() - startmillis < 60000 && millis() >= startmillis) {
     client.loop();
   }
   pBLEScan->stop();
