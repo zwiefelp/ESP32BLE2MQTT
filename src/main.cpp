@@ -234,7 +234,6 @@ void displayScreen(tempSensor t) {
   if ( t.type == "ThermoBeacon") {
     display.printf(".%02dC",(int)(value*100.0));
   } else {
-    value = int((t.temp - int(t.temp))*10);
     display.printf(".%01dC",(int)(value*10.0));
   }
   
