@@ -223,11 +223,8 @@ void displayScreen(tempSensor t) {
   display.setTextSize(1);
   display.setTextFont(6);
   int sign = 1;
-  if (t.temp < 0.0 ) {
-    display.print("-");
-    sign = -1;
-  }
-  display.print(int(t.temp));
+  if (t.temp < 0.0 ) sign = -1;
+  display.printf("%.0f", t.temp);
   display.setTextFont(4);
   // Set Precision
   double value = (t.temp - int(t.temp)) * sign;
