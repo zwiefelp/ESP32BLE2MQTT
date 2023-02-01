@@ -245,17 +245,16 @@ void displayScreen(tempSensor t) {
   display.setCursor(x,y);
   display.setTextSize(1);
   display.setTextFont(6);
-  display.print(int(t.temp));
+  int sign = 1;
+  if (t.temp < 0.0 ) sign = -1;
+  display.printf("%.0f", t.temp);
   display.setTextFont(4);
-
   // Set Precision
-  int value = 0;
+  double value = (t.temp - int(t.temp)) * sign;
   if ( t.type == "ThermoBeacon") {
-    value = int((t.temp - int(t.temp))*100);
-    display.printf(".%02uC",value);
+    display.printf(".%02dC",(int)(value*100.0));
   } else {
-    value = int((t.temp - int(t.temp))*10);
-    display.printf(".%uC",value);
+    display.printf(".%01dC",(int)(value*10.0));
   }
   
   //display humidity 
