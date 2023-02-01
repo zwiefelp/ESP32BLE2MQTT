@@ -6,7 +6,7 @@
 #define WIFI
 #define MQTT
 bool DEBUG = false;
-String version = "V1.0";
+String version = "V1.1";
 
 #ifdef WIFI
 #include <WiFi.h>
@@ -50,13 +50,18 @@ const unsigned char wifiicon[] PROGMEM  = {
 #ifdef MQTT
 String basetopic = "/openhab/in/";
 String conftopic = "/openhab/configuration/";
+String getconftopic = "/openhab/configuration";
 String cmdtopic;
 String timetopic = "/openhab/Daytime";
 String datetopic = "/openhab/DayDate";
 String debugtopic = "/openhab/debug/";
 
-IPAddress broker_int(192,168,20,17);          // Address of the MQTT broker
-IPAddress broker_ext(82,165,176,152);          // Address of the MQTT broker
+IPAddress broker_int(192,168,20,17);          // Address of the MQTT broker SSID=UPC4E87B2D
+IPAddress broker_ext(82,165,176,152);         
+IPAddress broker_openhab(192,168,1,1);        // Address of the MQTT broker SSID=OpenHAB
+IPAddress broker;
+String ssid;
+
 WiFiClient wificlient;
 PubSubClient client(wificlient);
 #endif
@@ -65,7 +70,6 @@ String mqttdate = "";
 String mqtttime = "";
 
 int MQ_COLOR = TFT_WHITE;
-
 
 u_int64_t espID;
 String client_id;
@@ -86,6 +90,8 @@ struct tempSensor {
   std::string mac;
   std::string type;
   std::string name;
+  std::string fullname = "none";
+  std::string device;
   double temp;
   double hum;
   double bat;
@@ -121,10 +127,15 @@ tempSensor getSensor(std::string mac, std::string name) {
   }
   tempSensor t1;
   t1.mac = mac;
+  t1.device = (mac.substr(0,2) + mac.substr(3,2) + mac.substr(6,2) + mac.substr(9,2) + mac.substr(12,2) + mac.substr(15,2)).c_str();
   t1.type = "new";
   t1.name = name;
   t1.num = sensors.size() + 1;
   sensors.push_back(t1);
+  #ifdef MQTT
+  String msg = "getconfig:"+client_id;
+  client.publish(getconftopic.c_str(),msg.c_str());
+  #endif
   return sensors.back();
 }
 
@@ -153,7 +164,16 @@ void setSensor(std::string mac, std::string type, double temp, double hum, doubl
       it->bat = bat;
       it->rssi = rssi;
       it->battype = battype;
-      it->lastupdate = mqttdate+ + " " + mqtttime;
+      it->lastupdate = mqttdate + " " + mqtttime;
+      return;
+    }
+  }
+}
+
+void setSensorName(std::string device, std::string fullname) {
+  for (auto it = sensors.rbegin(); it != sensors.rend(); it++) {
+    if (it->device == device) {
+      it->fullname = fullname;
       return;
     }
   }
@@ -214,8 +234,11 @@ void displayScreen(tempSensor t) {
   display.setTextFont(0);
   display.setTextSize(2);
   display.setCursor(x,y+18);
-  display.print(t.mac.c_str());
-
+  if (t.fullname == "none") {
+    display.print(t.mac.c_str());
+  } else {
+    display.print(t.fullname.c_str());
+  }
   // display temperature
   y=y+d+9;  
   display.setTextColor(TFT_ORANGE, TFT_BLACK);
@@ -463,6 +486,11 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   memcpy(spayload, payload, length);
   spayload[length] = '\0';
   String msg;
+  char delimiter[] = ":";
+  char *ptr;
+  char temp[50];
+  std::string device;
+  std::string fullname;
 
   Serial.print("Message arrived [");
   Serial.print(topic);
@@ -470,7 +498,18 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   Serial.println(spayload);
 
   if (strcmp(topic,conftopic.c_str()) == 0) {
-    // Do Stuff
+    ptr = strtok(spayload, delimiter);
+    if (ptr != NULL) {
+      if (strcmp(ptr,"name") == 0) { // Set Sensor Fullname
+        ptr = strtok(NULL, delimiter);
+        strcpy(temp,ptr);
+        device = temp;
+        ptr = strtok(NULL, delimiter);
+        strcpy(temp,ptr);
+        fullname = temp;
+        setSensorName(device,fullname);
+      }
+    }   
   }
 
   if (strcmp(topic,cmdtopic.c_str()) == 0) {
@@ -485,8 +524,13 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
     if ( strcmp(spayload,"getIP") == 0 ) {
       IPAddress ip = WiFi.localIP();
-      msg = "IP: " + ip.toString();
+      msg = "IP=" + ip.toString() + " SSID=" + ssid + " Broker=" + broker.toString();
       client.publish(conftopic.c_str() ,msg.c_str(), true);
+    }
+
+    if ( strcmp(spayload,"reconfig") == 0 ) {
+      msg = "getconfig:"+client_id;
+      client.publish(getconftopic.c_str(),msg.c_str());
     }
   }
 
@@ -497,7 +541,6 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   if (strcmp(topic,datetopic.c_str()) == 0) {
     mqttdate = spayload;
   }
-
 }
 
 void mqttReconnect() {
@@ -514,8 +557,7 @@ void mqttReconnect() {
       client.subscribe(cmdtopic.c_str());
       client.subscribe(timetopic.c_str());
       client.subscribe(datetopic.c_str());
-      
-      String msg = "Online IP=" + WiFi.localIP().toString();
+      String msg = "Online " + version + ": SSID=" + ssid + " IP=" + WiFi.localIP().toString() + " Broker=" + broker.toString();
       client.publish(debugtopic.c_str(),msg.c_str(),true);
       display_indicators(TFT_DARKGREY);
     } else {
@@ -562,7 +604,7 @@ void setup() {
   display.fillScreen(TFT_WHITE);
   display.setTextColor(TFT_BLACK,TFT_WHITE);
   display.setCursor(0,25);
-  display.println("BLE2MQTT starting...");
+  display.println("BLE2MQTT starting");
   display.println("");
   display.println("         UrsiUrsiUrsi");
   delay(2000);
@@ -581,16 +623,17 @@ void setup() {
   pBLEScan->setWindow(30);
   pBLEScan->setActiveScan(true);
 
-  #ifdef WIFI
-  Serial.println("Connect to WiFi...");
-  //WiFiManager, Local intialization. Once its business is done, there is no need to keep it around
-  WiFiManager wm;
   espID = ESP.getEfuseMac();
   client_id = "ble2mqtt-" + mac2String((byte*) &espID);
   conftopic = conftopic + client_id;
   cmdtopic = conftopic + "/cmd";
   debugtopic = debugtopic + client_id;
 
+  #ifdef WIFI
+  Serial.println("Connect to WiFi...");
+  //WiFiManager, Local intialization. Once its business is done, there is no need to keep it around
+  WiFiManager wm;
+  
   display.println("Connect to WIFI...");
   WiFi.mode(WIFI_STA);   
 
@@ -616,9 +659,19 @@ void setup() {
 
   #ifdef MQTT
   /* Prepare MQTT client */
-  Serial.printf("Connect to MQTT at %s", broker_ext.toString().c_str());
+  ssid = WiFi.SSID();
+
+  if (ssid == "UPC4E87B2D") {
+    broker = broker_int;
+  } else if (ssid == "OpenHAB") {
+    broker = broker_openhab;
+  } else {
+    broker = broker_ext;
+  }
+  
+  Serial.printf("Connect to MQTT at %s", broker.toString().c_str());
   Serial.println();
-  client.setServer(broker_ext, 1883);
+  client.setServer(broker, 1883);
   client.setCallback(mqttCallback);
   mqttReconnect();
   #endif
@@ -660,7 +713,7 @@ void loop() {
         Serial.print("Publish Sensor: ");
         Serial.print(t.mac.c_str());
         
-        dev = (t.mac.substr(0,2) + t.mac.substr(3,2) + t.mac.substr(6,2) + t.mac.substr(9,2) + t.mac.substr(12,2) + t.mac.substr(15,2)).c_str();
+        dev = t.device.c_str();
         Serial.print(" => ");
         Serial.println(basetopic + dev);
 
