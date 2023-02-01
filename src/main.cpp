@@ -562,7 +562,7 @@ void mqttReconnect() {
     } else {
       display_indicators(TFT_RED);
       Serial.print("failed, rc=");
-      Serial.print(client.state());
+      Serial.println(client.state());
     }
   }
 }
@@ -701,6 +701,10 @@ void loop() {
   if (WiFi.status() == WL_CONNECTED) {
     if (!client.connected()) {
       mqttReconnect();
+      if (client.connected()) {
+        String msg = "getconfig:"+client_id;
+        client.publish(getconftopic.c_str(),msg.c_str());
+      }
     } 
     // MQ Indikator anhand der Aktivität ändern
     
