@@ -593,6 +593,7 @@ void setup() {
   //Start serial communication
   Serial.begin(115200);
   Serial.println("BLE2MQTT starting...");
+  Serial.println(version);
 
   display.init();
   display.setRotation(1);
@@ -603,8 +604,10 @@ void setup() {
   display.fillScreen(TFT_WHITE);
   display.setTextColor(TFT_BLACK,TFT_WHITE);
   display.setCursor(0,25);
-  display.println("BLE2MQTT starting");
-  display.println("");
+  display.println(" BLE2MQTT starting");
+  display.printf("  Version: %s", version);
+  display.println();
+  display.println();
   display.println("         UrsiUrsiUrsi");
   delay(2000);
 
