@@ -740,6 +740,9 @@ void loop() {
         topic = basetopic + dev + "_name/state";
         msg = t.name.c_str();
         client.publish(topic.c_str(),msg.c_str(),true);
+        topic = basetopic + dev + "_fullname/state";
+        msg = t.fullname.c_str();
+        client.publish(topic.c_str(),msg.c_str(),true);
         topic = basetopic + dev + "_lastupdate/state";
         msg = t.lastupdate;
         client.publish(topic.c_str(),msg.c_str(),true);
