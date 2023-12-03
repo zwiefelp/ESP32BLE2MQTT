@@ -2,6 +2,7 @@ from tkinter import ttk
 import tkinter as tk
 import paho.mqtt.client as mqtt
 import time
+import subprocess, platform
 
 debug = False
 
@@ -59,10 +60,45 @@ def brestartcallback():
     publishcmd("restart") 
     
 def breconfigcallback():
-    publishcmd("reconfig")     
+    publishcmd("reconfig")
+
+def getWiFi():
+    output = "none"
+    # Get the name of the operating system.
+    os_name = platform.system()
+    # Check if the OS is Windows.
+    if os_name == "Windows":
+        # Command to list Wi-Fi networks on Windows using netsh.
+        list_networks_command = 'netsh wlan show networks'
+        # Execute the command and capture the result.
+        netcmd = subprocess.Popen(list_networks_command, shell=True, stderr=subprocess.PIPE, stdout=subprocess.PIPE )
+        output, error = netcmd.communicate()
+        output = output.decode("utf-8", "ignore")
+        #print(output)
+    # Check if the OS is Linux.
+    elif os_name == "Linux":
+        # Command to list Wi-Fi networks on Linux using nmcli.
+        list_networks_command = "nmcli device wifi list"
+        # Execute the command and capture the output.
+        output = subprocess.check_output(list_networks_command, shell=True, text=True)
+        # Print the output, all networks in range.
+        print(output)
+        # Handle unsupported operating systems.
+    else:
+        # Print a message indicating that the OS is unsupported (Not Linux or Windows).
+        print("Unsupported OS")
+        
+    return output
 
 # ************************* Main ****************************
-mqttBroker ="192.168.20.17"
+
+ssid = getWiFi()
+
+if "UPC4E87B2D" in ssid:
+    mqttBroker ="192.168.20.17"
+else:
+    mqttBroker ="82.165.176.152"
+
 mqclient = mqtt.Client("DesktopGUI")
 mqclient.connect(mqttBroker)
 
