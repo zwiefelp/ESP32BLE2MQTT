@@ -6,7 +6,7 @@
 #define WIFI
 #define MQTT
 bool DEBUG = false;
-String version = "V1.1";
+String version = "V2.0";
 
 #ifdef WIFI
 #include <WiFi.h>
@@ -61,13 +61,14 @@ IPAddress broker_ext(82,165,176,152);
 IPAddress broker_openhab(192,168,1,1);        // Address of the MQTT broker SSID=OpenHAB
 IPAddress broker;
 String ssid;
+IPAddress ip;
 
 WiFiClient wificlient;
 PubSubClient client(wificlient);
 #endif
 
-String mqttdate = "";
-String mqtttime = "";
+String mqttdate = "Mo,00.00.0000";
+String mqtttime = "00:00";
 
 int MQ_COLOR = TFT_WHITE;
 
@@ -80,7 +81,7 @@ TFT_eSPI display = TFT_eSPI();
 //Declare BLEScanner
 BLEScan* pBLEScan;
 
-int num = 1;
+int num = 0;
 
 #define BAT_VOLT 0
 #define BAT_PERCENT 1
@@ -202,6 +203,63 @@ void display_indicators(int col) {
   display_indicators();
 }
 
+void displayDateTime() {
+  display.fillScreen(TFT_BLACK);
+  uint8_t y = 0;
+  uint8_t d = 34;
+  uint8_t x = 0;
+
+  // display sensor numbers
+  display.setTextColor(TFT_WHITE, TFT_BLACK);
+  display.setTextFont(4);
+  for (int i=0; i <= sensors.size(); i++) {
+    display.setCursor(x + i*20, y);
+    if (i == 0) {
+      display.print("o");
+    } else {
+      display.print(".");
+    }
+  }
+
+  display_indicators();
+
+  // display Time
+  x=0;
+  y=24;
+  display.setTextColor(TFT_WHITE, TFT_BLACK);
+  display.setTextSize(1);
+  display.setTextFont(2);
+  display.setCursor(x,y);
+  display.printf("Device: %s",client_id.c_str());
+
+  x = 50;
+  y=y+22;
+  display.setTextColor(TFT_SKYBLUE, TFT_BLACK);
+  display.setTextSize(1);
+  display.setTextFont(6);
+  display.setCursor(x,y);
+  display.printf(mqtttime.c_str());
+
+  // display Date
+  x = 30;
+  y=y+d+12;
+  display.setTextColor(TFT_WHITE, TFT_BLACK);
+  display.setTextSize(1);
+  display.setTextFont(4);
+  display.setCursor(x,y);
+  display.printf(mqttdate.c_str());
+
+    // display WiFi
+  x = 0;
+  y=y+26;
+  display.setTextColor(TFT_WHITE, TFT_BLACK);
+  display.setTextSize(1);
+  display.setTextFont(2);
+  display.setCursor(x,y);
+  //wifi_power_t tx = WiFi.getTxPower();
+  display.printf("%s - %s",ssid.c_str(),ip.toString().c_str());
+}
+
 //function that prints the latest sensor readings in the OLED display
 void displayScreen(tempSensor t) {
   display.fillScreen(TFT_BLACK);
@@ -212,8 +270,8 @@ void displayScreen(tempSensor t) {
   // display sensor numbers
   display.setTextColor(TFT_WHITE, TFT_BLACK);
   display.setTextFont(4);
-  for (int i=1; i <= sensors.size(); i++) {
-    display.setCursor(x + (i-1)*20, y);
+  for (int i=0; i <= sensors.size(); i++) {
+    display.setCursor(x + i*20, y);
     if (t.num == i) {
       display.print("o");
     } else {
@@ -307,8 +365,12 @@ void displaySensor(std::string mac) {
   displayScreen(getSensor(mac));
 }
 
-void displaySensor(int i ){
-  displayScreen(getSensor(i));
+void displaySensor(int i){
+  if ( i == 0 ) { 
+    displayDateTime();
+  } else {
+    displayScreen(getSensor(i));
+  }
 }
 
 void printReadings(double temp, double hum, double bat, int rssi, int battype) {
@@ -465,13 +527,13 @@ void IRAM_ATTR toggleButton1() {
   if (num < sensors.size()) {
     num++;
   } else {
-    num = 1;
+    num = 0;
   }
   displaySensor(num);
 }
 
 void IRAM_ATTR toggleButton2() {
-  if ( num > 1 ) {
+  if ( num > 0 ) {
     num--;
   } else {
     num = sensors.size();
@@ -522,7 +584,6 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     }
 
     if ( strcmp(spayload,"getIP") == 0 ) {
-      IPAddress ip = WiFi.localIP();
       msg = "IP=" + ip.toString() + " SSID=" + ssid + " Broker=" + broker.toString();
       client.publish(conftopic.c_str() ,msg.c_str(), true);
     }
@@ -531,14 +592,38 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       msg = "getconfig:"+client_id;
       client.publish(getconftopic.c_str(),msg.c_str());
     }
+
+    // setScreen+
+    if ( strcmp(spayload,"setScreen+") == 0 ) {
+      toggleButton1();
+    }
+
+    // setScreen-
+    if ( strcmp(spayload,"setScreen-") == 0 ) {
+      toggleButton2();
+    }
+    // setScreen: X
+
+    // getMaxSensor
+    if ( strcmp(spayload,"getMaxSensor") == 0 ) {
+      msg = "maxScreen:"+sensors.size();
+      client.publish(conftopic.c_str() ,msg.c_str(), true);
+    }
+
   }
 
   if (strcmp(topic,timetopic.c_str()) == 0) {
     mqtttime = spayload;
+    if (num == 0) {
+      displaySensor(0);
+    }
   }
 
   if (strcmp(topic,datetopic.c_str()) == 0) {
     mqttdate = spayload;
+    if (num == 0) {
+      displaySensor(0);
+    }
   }
 }
 
@@ -595,6 +680,11 @@ void setup() {
   Serial.println("BLE2MQTT starting...");
   Serial.println(version);
 
+  // Setup Buttons
+  pinMode(BUTTON1PIN, INPUT);
+  pinMode(BUTTON2PIN, INPUT);
+
+  // Setup Display
   display.init();
   display.setRotation(1);
   display.setTextSize(1);
@@ -608,7 +698,7 @@ void setup() {
   display.printf("  Version: %s", version);
   display.println();
   display.println();
-  display.println("         UrsiUrsiUrsi");
+  display.println(" ..Nihil fit sine causa..");
   delay(2000);
 
   display.fillScreen(TFT_BLACK);
@@ -632,12 +722,22 @@ void setup() {
   debugtopic = debugtopic + client_id;
 
   #ifdef WIFI
-  Serial.println("Connect to WiFi...");
-  //WiFiManager, Local intialization. Once its business is done, there is no need to keep it around
-  WiFiManager wm;
   
-  display.println("Connect to WIFI...");
+  //WiFiManager, Local intialization. Once its business is done, there is no need to keep it around
+  Serial.println("Creating WiFi Manager...");
+  WiFiManager wm;  
   WiFi.mode(WIFI_STA);   
+
+  // Button2 Press on Startup Resets WiFi Settings and starts AP Mode
+  if ( digitalRead(BUTTON2PIN) == LOW ) {
+    Serial.println("Reset WiFi Settings - Starting in AP Mode.");
+    display.println("Reset WiFi Settings...");
+    display.println("Starting AP Mode.");
+    wm.resetSettings();
+  } else {
+    Serial.println("Connect to WiFi...");
+    display.println("Connect to WIFI...");
+  }
 
   bool res;
   wm.setConnectTimeout(10);
@@ -662,6 +762,7 @@ void setup() {
   #ifdef MQTT
   /* Prepare MQTT client */
   ssid = WiFi.SSID();
+  ip = WiFi.localIP();
 
   if (ssid == "UPC4E87B2D") {
     broker = broker_int;
@@ -678,8 +779,7 @@ void setup() {
   mqttReconnect();
   #endif
 
-  pinMode(BUTTON1PIN, INPUT);
-  pinMode(BUTTON2PIN, INPUT);
+  // Attach Button Callbacks
   attachInterrupt(BUTTON1PIN, toggleButton1, RISING);
   attachInterrupt(BUTTON2PIN, toggleButton2, RISING);
 }
