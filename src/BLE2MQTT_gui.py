@@ -1,10 +1,70 @@
 from tkinter import ttk
 import tkinter as tk
 import paho.mqtt.client as mqtt
-import time
+import datetime
 import subprocess, platform
+import re
 
 debug = False
+sensor = {"device": []}
+sensorframe = {}
+sensorwidget ={}
+bigfont = ("Helvetica", "12")
+valfont = ("Helvetica", "22")
+
+def debugprint(msg):
+        now = datetime.datetime.now()
+        msg = now.strftime("%Y.%m.%d %H:%M:%S.%f") + ": " + msg
+        try:
+            debuglog.insert('end', msg + '\n')
+            debuglog.see('end')
+        except:
+            pass
+        print(msg)
+        
+def addsensor(dev):
+    debugprint("Add Sensor:" + dev)
+    sensorframe[dev] = tk.Frame(sensorcontainer, padx=2, pady=2, bd=1, relief="solid")
+    sensorwidget[dev + "_device_lbl"] = tk.Label(sensorframe[dev], bg="white", justify="left", font=bigfont, text="Sensor ID: " + dev)
+    sensorwidget[dev + "_device_lbl"].grid(row=0, column=0, sticky="EW", columnspan = 2)
+    #sensorwidget[dev + "_device_val"] = tk.Label(sensorframe[dev], bg="white", font=bigfont, text=dev)
+    #sensorwidget[dev + "_device_val"].grid(row=0, column=1, sticky="EW")
+    sensorcontainer.window_create("end", window=sensorframe[dev])
+    
+def addwidget(dev,field):
+    key = dev + "_" + field
+    if not key + "_lbl" in sensorwidget.keys():
+        r = sensor[dev]['count']
+        sensorwidget[key + "_lbl"] = tk.Label(sensorframe[dev], font=bigfont, justify="left", text = field)
+        sensorwidget[key + "_lbl"].grid(row = r, column = 0, sticky="W")
+        sensorwidget[key + "_val"] = tk.Label(sensorframe[dev], font=bigfont, text = sensor[dev][field])
+        sensorwidget[key + "_val"].grid(row = r, column = 1, sticky="EW")
+
+def updatewidget(dev,field):
+    key = dev + "_" + field + "_val"
+    sensorwidget[key].config(text = sensor[dev][field])
+    
+def reconfigureLayout(dev):
+    if sensor[dev]['type'] in "ThermoBeacon,Govee H5075":
+        #debugprint("Reconfigure " + sensor[dev]['type'])
+        sensorwidget[dev+"_fullname_val"].config(bg="white")
+        sensorwidget[dev+"_fullname_val"].grid(row=0, column=0, columnspan=2, sticky="EW")
+        sensorwidget[dev+"_fullname_lbl"].config(text = "Device ID")
+        sensorwidget[dev+"_device_lbl"].config(text = dev, bg="white smoke")
+        sensorwidget[dev+"_device_lbl"].grid(row=8, column=1, columnspan=1)
+        sensorwidget[dev+"_temp_lbl"].lower()
+        sensorwidget[dev+"_temp_val"].config(fg="dark orange", font=valfont)
+        sensorwidget[dev+"_temp_val"].grid(row=1, column=0, rowspan=2, sticky="EW")
+        sensorwidget[dev+"_hum_lbl"].lower()
+        sensorwidget[dev+"_hum_val"].config(fg="DeepSkyBlue3", font=valfont)
+        sensorwidget[dev+"_hum_val"].grid(row=1, column=1, rowspan=2, sticky="EW")
+        
+def printsensors():
+    for d in sensor:
+        print ("Sensor: " + d)
+        s = sensor[d]
+        for key in s:
+            print("  " + key + " => " + s[key])
 
 def on_message(client, userdata, message):
     try:
@@ -18,31 +78,51 @@ def on_message(client, userdata, message):
         topic="error"    
     
     if debug:    
-        print("message topic=",topic)    
-        print("message received " , payload)
-        print("message qos=",message.qos)
-        print("message retain flag=",message.retain)
+        debugprint("message topic=",topic)    
+        debugprint("message received " , payload)
+        debugprint("message qos=",message.qos)
+        debugprint("message retain flag=",message.retain)
     
     if message.retain == 0:
-        textbox.insert('end', time.ctime() + ": " + topic + ':' + payload + '\n')
-        textbox.see('end')
+        now = datetime.datetime.now()
+        mqttlog.insert('end', now.strftime("%Y.%m.%d %H:%M:%S.%f") + ": " + topic + ':' + payload + '\n')
+        mqttlog.see('end')
+        
     if message.retain == 1 and '/openhab/debug/ble2mqtt-' in topic:
         newdev = topic.split('/')[3]
         devices.append(newdev)
         cbDevices['values'] = devices
         cbDevices.set(newdev)
-        print("Found: " + topic.split('/')[3])
-        
+        debugprint("Found Device: " + topic.split('/')[3])
+    
+    m = re.match("^\/openhab\/in\/([0-9,a-f]{12})_(.+)\/state",topic)
+    if message.retain == 0 and m:
+        (dev,field)  = m.groups()
+        if not dev in sensor.keys():
+            debugprint("Found Sensor: " + dev)
+            sensor[dev] = {'count': 0}
+            addsensor(dev)
+                       
+        sensor[dev][field] = payload
+        key = dev + "_" + field
+        if not key + "_lbl" in sensorwidget.keys():
+            sensor[dev]['count'] = sensor[dev]['count'] + 1
+            addwidget(dev,field)         
+        else:
+            updatewidget(dev,field)
+            if "type" in field:
+                reconfigureLayout(dev)
+    
 def publishcmd(command):
     dev = cbDevices.get()
     if dev != '':
         testtopic = "/openhab/configuration/" + dev
         if debug:
-            print(testtopic + " => " + command)
+            debugprint(testtopic + " => " + command)
         try:
             mqclient.publish(testtopic +  "/cmd", command)
         except Exception as e:
-            print ("MQ send failed: {}".format(e))
+            debugprint ("MQ send failed: {}".format(e))
     
 def bgetIPcallback():
     publishcmd("getIP")
@@ -133,16 +213,40 @@ breconfig= tk.Button(buttonframe, text="Reconfigure", padx=10, command=breconfig
 breconfig.pack(padx=2, pady=2, side="right")
 buttonframe.pack(fill="x")
 
-textbox = tk.Text(height = 60,  width = 120)
-vsb = tk.Scrollbar(orient="vertical", command = textbox.yview)
-textbox.configure(yscrollcommand=vsb.set)
-vsb.pack(side="right", fill="y")
-textbox.pack(side="left", fill="both", expand=True)
+tabControl = ttk.Notebook(window)
+mqtttab = ttk.Frame(tabControl)
+logtab = ttk.Frame(tabControl)
+sensortab = ttk.Frame(tabControl)
 
-print("Start Loop...")
+tabControl.add(mqtttab, text=' MQTT Messages ')
+tabControl.add(sensortab, text=' Sensors ')
+tabControl.add(logtab, text=' Debug Log ')
+tabControl.pack(expand=1, fill="both")
+
+sensorcontainer = tk.Text(sensortab, wrap="char", borderwidth=0, highlightthickness=0, state="disabled", cursor="arrow") 
+sensorvbs = tk.Scrollbar(sensortab,orient="vertical", command = sensorcontainer.yview)
+sensorcontainer.configure(yscrollcommand=sensorvbs.set)
+sensorvbs.pack(side="right", fill="y")
+sensorcontainer.pack(side="left", fill="both", expand=True)
+
+mqttlog = tk.Text(mqtttab, height = 60,  width = 120)
+mqttvbs = tk.Scrollbar(mqtttab,orient="vertical", command = mqttlog.yview)
+mqttlog.configure(yscrollcommand=mqttvbs.set)
+mqttvbs.pack(side="right", fill="y")
+mqttlog.pack(side="left", fill="both", expand=True)
+
+debuglog = tk.Text(logtab, height = 60,  width = 120)
+debugvbs = tk.Scrollbar(logtab,orient="vertical", command = debuglog.yview)
+debuglog.configure(yscrollcommand=debugvbs.set)
+debugvbs.pack(side="right", fill="y")
+debuglog.pack(side="left", fill="both", expand=True)
+
+debugprint("Start Loop...")
 mqclient.loop_start()
-print("Subscribe...")
+debugprint("Subscribe...")
 mqclient.subscribe([(conftopic,0),(debugtopic,0),(basetopic,0)])
 window.mainloop()
 mqclient.loop_stop()
-print("Stop Loop...")
+
+debugprint("Stop Loop...")
+

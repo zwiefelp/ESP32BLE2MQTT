@@ -602,7 +602,6 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if ( strcmp(spayload,"setScreen-") == 0 ) {
       toggleButton2();
     }
-    // setScreen: X
 
     // getMaxSensor
     if ( strcmp(spayload,"getMaxSensor") == 0 ) {
@@ -610,7 +609,15 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       client.publish(conftopic.c_str() ,msg.c_str(), true);
     }
 
-  }
+    // setScreen: X
+    
+    // BlinkScreen
+
+    // Turn Off Screen
+
+    // MQTT Debug On
+
+  } // End Commands
 
   if (strcmp(topic,timetopic.c_str()) == 0) {
     mqtttime = spayload;
@@ -849,6 +856,9 @@ void loop() {
         client.publish(topic.c_str(),msg.c_str(),true);
         topic = basetopic + dev + "_lastupdate/state";
         msg = t.lastupdate;
+        client.publish(topic.c_str(),msg.c_str(),true);
+        topic = basetopic + dev + "_gateway/state";
+        msg = client_id;
         client.publish(topic.c_str(),msg.c_str(),true);
       }
       display_indicators(TFT_DARKGREY);
