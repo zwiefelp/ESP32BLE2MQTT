@@ -46,18 +46,31 @@ def updatewidget(dev,field):
     
 def reconfigureLayout(dev):
     if sensor[dev]['type'] in "ThermoBeacon,Govee H5075":
-        #debugprint("Reconfigure " + sensor[dev]['type'])
+        sensor[dev]["layouttype"] = "thermo"
+        debugprint("Reconfigure " + sensor[dev]['type'] + " => Thermo")
+        valueframe = tk.Frame(sensorframe[dev], padx=2, pady=2)
+        valueframe.grid(row=1, column=0, columnspan=2, rowspan=2, sticky="EW")
+        
         sensorwidget[dev+"_fullname_val"].config(bg="white")
         sensorwidget[dev+"_fullname_val"].grid(row=0, column=0, columnspan=2, sticky="EW")
-        sensorwidget[dev+"_fullname_lbl"].config(text = "Device ID")
+        sensorwidget[dev+"_fullname_lbl"].config(text = "Sensor ID")
         sensorwidget[dev+"_device_lbl"].config(text = dev, bg="white smoke")
         sensorwidget[dev+"_device_lbl"].grid(row=8, column=1, columnspan=1)
-        sensorwidget[dev+"_temp_lbl"].lower()
-        sensorwidget[dev+"_temp_val"].config(fg="dark orange", font=valfont)
-        sensorwidget[dev+"_temp_val"].grid(row=1, column=0, rowspan=2, sticky="EW")
-        sensorwidget[dev+"_hum_lbl"].lower()
-        sensorwidget[dev+"_hum_val"].config(fg="DeepSkyBlue3", font=valfont)
-        sensorwidget[dev+"_hum_val"].grid(row=1, column=1, rowspan=2, sticky="EW")
+        
+        sensorwidget[dev+"_temp_lbl"].destroy()
+        sensorwidget[dev+"_temp_val"].destroy()
+        sensorwidget[dev+"_hum_lbl"].destroy()
+        sensorwidget[dev+"_hum_val"].destroy()
+        
+        sensorwidget[dev+"_temp_val"] = tk.Label(valueframe, fg="dark orange", font=valfont, text = sensor[dev]["temp"])
+        sensorwidget[dev+"_temp_val"].pack(side="left")
+        sensorwidget[dev+"_temp_lbl"] = tk.Label(valueframe, fg="dark orange", font=valfont, text = "°C ")
+        sensorwidget[dev+"_temp_lbl"].pack(side="left")
+        
+        sensorwidget[dev+"_hum_val"] = tk.Label(valueframe, fg="DeepSkyBlue3", font=valfont, text = sensor[dev]["hum"])
+        sensorwidget[dev+"_hum_val"].pack(side="left")
+        sensorwidget[dev+"_hum_lbl"] = tk.Label(valueframe, fg="DeepSkyBlue3", font=valfont, text = "%")
+        sensorwidget[dev+"_hum_lbl"].pack(side="left")
         
 def printsensors():
     for d in sensor:
@@ -110,7 +123,7 @@ def on_message(client, userdata, message):
             addwidget(dev,field)         
         else:
             updatewidget(dev,field)
-            if "type" in field:
+            if "type" in field and not "layouttype" in sensor[dev].keys():
                 reconfigureLayout(dev)
     
 def publishcmd(command):
