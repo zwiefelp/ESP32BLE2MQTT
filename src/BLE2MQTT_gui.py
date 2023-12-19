@@ -9,7 +9,7 @@ debug = False
 sensor = {"device": []}
 sensorframe = {}
 sensorwidget ={}
-bigfont = ("Helvetica", "12")
+medfont = ("Helvetica", "12")
 valfont = ("Helvetica", "22")
 
 def debugprint(msg):
@@ -25,9 +25,9 @@ def debugprint(msg):
 def addsensor(dev):
     debugprint("Add Sensor:" + dev)
     sensorframe[dev] = tk.Frame(sensorcontainer, padx=2, pady=2, bd=1, relief="solid")
-    sensorwidget[dev + "_device_lbl"] = tk.Label(sensorframe[dev], bg="white", justify="left", font=bigfont, text="Sensor ID: " + dev)
+    sensorwidget[dev + "_device_lbl"] = tk.Label(sensorframe[dev], bg="white", justify="left", font=medfont, text="Sensor ID: " + dev)
     sensorwidget[dev + "_device_lbl"].grid(row=0, column=0, sticky="EW", columnspan = 2)
-    #sensorwidget[dev + "_device_val"] = tk.Label(sensorframe[dev], bg="white", font=bigfont, text=dev)
+    #sensorwidget[dev + "_device_val"] = tk.Label(sensorframe[dev], bg="white", font=medfont, text=dev)
     #sensorwidget[dev + "_device_val"].grid(row=0, column=1, sticky="EW")
     sensorcontainer.window_create("end", window=sensorframe[dev])
     
@@ -35,9 +35,9 @@ def addwidget(dev,field):
     key = dev + "_" + field
     if not key + "_lbl" in sensorwidget.keys():
         r = sensor[dev]['count']
-        sensorwidget[key + "_lbl"] = tk.Label(sensorframe[dev], font=bigfont, justify="left", text = field)
+        sensorwidget[key + "_lbl"] = tk.Label(sensorframe[dev], font=medfont, justify="left", text = field)
         sensorwidget[key + "_lbl"].grid(row = r, column = 0, sticky="W")
-        sensorwidget[key + "_val"] = tk.Label(sensorframe[dev], font=bigfont, text = sensor[dev][field])
+        sensorwidget[key + "_val"] = tk.Label(sensorframe[dev], font=medfont, text = sensor[dev][field])
         sensorwidget[key + "_val"].grid(row = r, column = 1, sticky="EW")
 
 def updatewidget(dev,field):
@@ -62,15 +62,19 @@ def reconfigureLayout(dev):
         sensorwidget[dev+"_hum_lbl"].destroy()
         sensorwidget[dev+"_hum_val"].destroy()
         
-        sensorwidget[dev+"_temp_val"] = tk.Label(valueframe, fg="dark orange", font=valfont, text = sensor[dev]["temp"])
+        sensorwidget[dev+"_temp_val"] = tk.Label(valueframe, fg="dark orange", 
+                                                 font=valfont, text = sensor[dev]["temp"])
         sensorwidget[dev+"_temp_val"].pack(side="left")
-        sensorwidget[dev+"_temp_lbl"] = tk.Label(valueframe, fg="dark orange", font=valfont, text = "°C ")
+        sensorwidget[dev+"_temp_lbl"] = tk.Label(valueframe, fg="dark orange", 
+                                                 font=valfont, text = "°C ")
         sensorwidget[dev+"_temp_lbl"].pack(side="left")
         
-        sensorwidget[dev+"_hum_val"] = tk.Label(valueframe, fg="DeepSkyBlue3", font=valfont, text = sensor[dev]["hum"])
-        sensorwidget[dev+"_hum_val"].pack(side="left")
-        sensorwidget[dev+"_hum_lbl"] = tk.Label(valueframe, fg="DeepSkyBlue3", font=valfont, text = "%")
-        sensorwidget[dev+"_hum_lbl"].pack(side="left")
+        sensorwidget[dev+"_hum_lbl"] = tk.Label(valueframe, fg="DeepSkyBlue3", 
+                                                font=valfont, text = "%")
+        sensorwidget[dev+"_hum_lbl"].pack(side="right")
+        sensorwidget[dev+"_hum_val"] = tk.Label(valueframe, fg="DeepSkyBlue3", 
+                                                font=valfont, text = sensor[dev]["hum"])
+        sensorwidget[dev+"_hum_val"].pack(side="right")
         
 def printsensors():
     for d in sensor:
@@ -97,9 +101,12 @@ def on_message(client, userdata, message):
         debugprint("message retain flag=",message.retain)
     
     if message.retain == 0:
-        now = datetime.datetime.now()
-        mqttlog.insert('end', now.strftime("%Y.%m.%d %H:%M:%S.%f") + ": " + topic + ':' + payload + '\n')
-        mqttlog.see('end')
+        if '/openhab/debug/ble2mqtt-' in topic:
+            debugprint(topic.split('/')[3] + ":" + payload)
+        else:    
+            now = datetime.datetime.now()
+            mqttlog.insert('end', now.strftime("%Y.%m.%d %H:%M:%S.%f") + ": " + topic + ':' + payload + '\n')
+            mqttlog.see('end')
         
     if message.retain == 1 and '/openhab/debug/ble2mqtt-' in topic:
         newdev = topic.split('/')[3]
@@ -120,10 +127,10 @@ def on_message(client, userdata, message):
         key = dev + "_" + field
         if not key + "_lbl" in sensorwidget.keys():
             sensor[dev]['count'] = sensor[dev]['count'] + 1
-            addwidget(dev,field)         
+            addwidget(dev,field)
         else:
             updatewidget(dev,field)
-            if "type" in field and not "layouttype" in sensor[dev].keys():
+            if field=="type" and not "layouttype" in sensor[dev].keys():
                 reconfigureLayout(dev)
     
 def publishcmd(command):
@@ -154,6 +161,12 @@ def brestartcallback():
     
 def breconfigcallback():
     publishcmd("reconfig")
+
+def bblankScreenCallback():
+    publishcmd("blankScreen")
+    
+def bdebugCallback():
+    publishcmd("debug")
 
 def getWiFi():
     output = "none"
@@ -220,6 +233,11 @@ bsetScreenMinus = tk.Button(buttonframe, text="Screen -", padx=10, command=bsetS
 bsetScreenMinus.pack(padx=2, pady=2, side="left")
 bsetScreenPlus = tk.Button(buttonframe, text="Screen +", padx=10, command=bsetScreenPluscallback)
 bsetScreenPlus.pack(padx=2, pady=2, side="left")
+bblankScreen = tk.Button(buttonframe, text="Screen Off", padx=10, command=bblankScreenCallback)
+bblankScreen.pack(padx=2, pady=2, side="left")
+bdebug = tk.Button(buttonframe, text="Toggle Debug", padx=10, command=bdebugCallback)
+bdebug.pack(padx=2, pady=2, side="left")
+
 brestart = tk.Button(buttonframe, text="Restart", padx=10, command=brestartcallback)
 brestart.pack(padx=2, pady=2, side="right")
 breconfig= tk.Button(buttonframe, text="Reconfigure", padx=10, command=breconfigcallback)

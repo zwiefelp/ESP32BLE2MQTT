@@ -6,7 +6,7 @@
 #define WIFI
 #define MQTT
 bool DEBUG = false;
-String version = "V2.0";
+String version = "V2.2";
 
 #ifdef WIFI
 #include <WiFi.h>
@@ -77,6 +77,7 @@ String client_id;
 
 // Create object "tft"
 TFT_eSPI display = TFT_eSPI();
+bool displayON = true;
 
 //Declare BLEScanner
 BLEScan* pBLEScan;
@@ -120,6 +121,16 @@ std::__cxx11::string string_to_hex(const std::__cxx11::string& input, int length
         output.push_back(hex_digits[16]);
     }
     return output;
+}
+
+/**
+ * Print Debug Output to Serial and/or MQTT
+**/
+void debugPrintln(std::__cxx11::string msg) {
+  if (client.connected()) {
+    client.publish(debugtopic.c_str(), msg.c_str());
+  }
+  Serial.println(msg.c_str());
 }
 
 tempSensor getSensor(std::string mac, std::string name) {
@@ -205,6 +216,12 @@ void display_indicators(int col) {
 
 void displayDateTime() {
   display.fillScreen(TFT_BLACK);
+  
+  if (!displayON) {
+    display_indicators();
+    return;
+  }
+    
   uint8_t y = 0;
   uint8_t d = 34;
   uint8_t x = 0;
@@ -263,6 +280,12 @@ void displayDateTime() {
 //function that prints the latest sensor readings in the OLED display
 void displayScreen(tempSensor t) {
   display.fillScreen(TFT_BLACK);
+
+  if (!displayON) {
+    display_indicators();
+    return;
+  }
+
   uint8_t y = 0;
   uint8_t d = 34;
   uint8_t x = 0;
@@ -418,19 +441,17 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
     memcpy(spayload, payload, plength);
 
     if (DEBUG) {
-      Serial.print("Found Device Advertisement. Manufacturer=");
-      Serial.print(mac.substr(0,8).c_str());
-      Serial.print(" - Device Name: ");
-      Serial.println(advertisedDevice.getName().c_str());
-      Serial.print("Manufacturer Data, length=");
-      Serial.println(data.size());
-      Serial.println(string_to_hex(data.c_str(), data.length()).c_str());
+      debugPrintln("Found Device Advertisement. Mac-Address=" + mac);
+      debugPrintln("Manufacturer=" + mac.substr(0,8) + " - Device Name: " + advertisedDevice.getName());
+      debugPrintln("Manufacturer Data, length=" + std::to_string(data.size()));
+      debugPrintln(string_to_hex(data.c_str(), data.length()));
+      
       spayload[plength] = '\0';
-      Serial.print("Payload Raw: length=");
-      Serial.println(plength);
-      Serial.println(spayload);
-      Serial.println("Payload Hex:");
-      Serial.println(string_to_hex(spayload, plength).c_str());
+
+      debugPrintln("Payload Raw: length=" + std::to_string(plength));
+      //Serial.println(spayload);
+      //debugPrintln("Payload Hex:");
+      debugPrintln(string_to_hex(spayload, plength));
       //Serial.print("Manufacturer Key: ");
       //Serial.println(string_to_hex(spayload, plength).substr(69,5).c_str());
     }
@@ -524,19 +545,27 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
 };
 
 void IRAM_ATTR toggleButton1() {
-  if (num < sensors.size()) {
-    num++;
+  if (!displayON) {
+    displayON = true;
   } else {
-    num = 0;
+    if (num < sensors.size()) {
+      num++;
+    } else {
+      num = 0;
+    }
   }
   displaySensor(num);
 }
 
 void IRAM_ATTR toggleButton2() {
-  if ( num > 0 ) {
-    num--;
+  if (!displayON) {
+    displayON = true;
   } else {
-    num = sensors.size();
+    if ( num > 0 ) {
+      num--;
+    } else {
+      num = sensors.size();
+    }
   }
   displaySensor(num);
 }
@@ -612,10 +641,23 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     // setScreen: X
     
     // BlinkScreen
-
+    
     // Turn Off Screen
-
+    if ( strcmp(spayload,"blankScreen") == 0 ) {
+      displayON = false;
+      displaySensor(num);
+    }
     // MQTT Debug On
+    if ( strcmp(spayload,"debug") == 0 ) {
+      if (!DEBUG) {
+        DEBUG = true;
+        debugPrintln("DEBUG=ON");
+      } else {
+        debugPrintln("DEBUG=OFF");
+        DEBUG = false;
+      }
+      displaySensor(num);
+    }
 
   } // End Commands
 
@@ -659,14 +701,7 @@ void mqttReconnect() {
   }
 }
 
-/**
- * Print Debug Output to Serial and/or MQTT
-**/
-void MQTTdebugPrint(char* msg) {
-  if (client.connected()) {
-    client.publish(debugtopic.c_str(), msg);
-  }
-}
+
 #endif
 
 String mac2String(byte ar[]) {
@@ -736,8 +771,8 @@ void setup() {
   WiFi.mode(WIFI_STA);   
 
   // Button2 Press on Startup Resets WiFi Settings and starts AP Mode
-  if ( digitalRead(BUTTON2PIN) == LOW ) {
-    Serial.println("Reset WiFi Settings - Starting in AP Mode.");
+  if ( digitalRead(BUTTON1PIN) == LOW ) {
+    Serial.println("Button1Pin is low - Reset WiFi Settings - Starting in AP Mode.");
     display.println("Reset WiFi Settings...");
     display.println("Starting AP Mode.");
     wm.resetSettings();
@@ -854,11 +889,11 @@ void loop() {
         topic = basetopic + dev + "_fullname/state";
         msg = t.fullname.c_str();
         client.publish(topic.c_str(),msg.c_str(),true);
-        topic = basetopic + dev + "_lastupdate/state";
-        msg = t.lastupdate;
-        client.publish(topic.c_str(),msg.c_str(),true);
         topic = basetopic + dev + "_gateway/state";
         msg = client_id;
+        client.publish(topic.c_str(),msg.c_str(),true);
+        topic = basetopic + dev + "_lastupdate/state";
+        msg = t.lastupdate;
         client.publish(topic.c_str(),msg.c_str(),true);
       }
       display_indicators(TFT_DARKGREY);
