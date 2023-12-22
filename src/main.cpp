@@ -2,11 +2,13 @@
 #include "BLEDevice.h"
 #include <TFT_eSPI.h>
 #include <WiFiManager.h>
+#include <aes/esp_aes.h>
+#include <array>
 
 #define WIFI
 #define MQTT
 bool DEBUG = false;
-String version = "V2.2";
+String version = "V2.3";
 
 #ifdef WIFI
 #include <WiFi.h>
@@ -24,6 +26,9 @@ String version = "V2.2";
 
 #define GOVEE_BT_mac_OUI_PREFIX "a4:c1:38"
 #define H5075_UPDATE_UUID16  "88:ec"
+#define VICTRON_BT_mac_OUI_PREFIX "60:a4:23"
+#define SMARTSOLAR_ENCRYPTION_KEY 0x0df4d0395b7d1a876c0c33ecb9e70aea
+#define VICTRON_ENCRYPTED_DATA_MAX_SIZE 16
 
 #define FINE_SCAN true
 
@@ -421,6 +426,39 @@ void printReadings(double temp, double hum, double bat, int rssi, int battype) {
   Serial.println("db");
 }
 
+bool decrypt_message_(const u_int8_t *crypted_data, const u_int8_t crypted_len,
+                                  u_int8_t encrypted_data[VICTRON_ENCRYPTED_DATA_MAX_SIZE],
+                                  const u_int8_t data_counter_lsb, const u_int8_t data_counter_msb) {
+  esp_aes_context ctx;
+  esp_aes_init(&ctx);
+  unsigned char bindkey = (unsigned char) SMARTSOLAR_ENCRYPTION_KEY;
+  //std::array<uint8_t, 16> key;
+  //key = (std::array<uint8_t, 16>)(unsigned char) SMARTSOLAR_ENCRYPTION_KEY;
+  //bindkey = (std::array<uint8_t, 16>)SMARTSOLAR_ENCRYPTION_KEY;
+  auto status = esp_aes_setkey(&ctx, &bindkey, 16 * 8);
+  if (status != 0) {
+    Serial.printf("Error during esp_aes_setkey operation (%i).", status);
+    esp_aes_free(&ctx);
+    return false;
+  }
+
+  size_t nc_offset = 0;
+  u_int8_t nonce_counter[16] = {data_counter_lsb, data_counter_msb, 0};
+  u_int8_t stream_block[16] = {0};
+
+  status = esp_aes_crypt_ctr(&ctx, crypted_len, &nc_offset, nonce_counter, stream_block, crypted_data, encrypted_data);
+  if (status != 0) {
+    //ESP_LOGE(TAG, "[%s] Error during esp_aes_crypt_ctr operation (%i).", this->address_str().c_str(), status);
+    esp_aes_free(&ctx);
+    return false;
+  }
+
+  esp_aes_free(&ctx);
+  Serial.printf("Enrypted message: %s",
+           string_to_hex((char *)encrypted_data, crypted_len));
+  return true;
+}
+
 //Callback function that gets called, when another device's advertisement has been received
 class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
   void onResult(BLEAdvertisedDevice advertisedDevice) {
@@ -449,7 +487,7 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
       spayload[plength] = '\0';
 
       debugPrintln("Payload Raw: length=" + std::to_string(plength));
-      //Serial.println(spayload);
+      Serial.println(spayload);
       //debugPrintln("Payload Hex:");
       debugPrintln(string_to_hex(spayload, plength));
       //Serial.print("Manufacturer Key: ");
@@ -537,9 +575,27 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
       }
     }
     /*
-    *     Victron SmartSolar?
+    *     Victron SmartSolar? 
+    *     VICTRON_MANUFACTURER_ID = 0x02E1;
     *
     */
+    if (mac.substr(0,8) == VICTRON_BT_mac_OUI_PREFIX) {
+      Serial.print("Victron Data Received: ");
+      Serial.println(mac.c_str());
+      char recordtype = data[0];
+      u_int16_t noonce = data[1] + 256 * data[2];
+      char byte0 = data[3];
+
+      debugPrintln("Received Victron Data: Recordtype=" + std::to_string(recordtype));
+      debugPrintln("  noonce=" + std::to_string(noonce) + " byte0=" + std::to_string(byte0));
+
+      if (recordtype == 0x01) { // Solar Charger
+        u_int8_t *data;
+
+        
+      }
+    }
+
     if (DEBUG) Serial.println("--------------------------------------------------------------------------");
   }
 };
