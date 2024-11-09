@@ -25,7 +25,7 @@ def debugprint(msg):
 def addsensor(dev):
     debugprint("Add Sensor:" + dev)
     sensorframe[dev] = tk.Frame(sensorcontainer, padx=2, pady=2, bd=1, relief="solid")
-    sensorwidget[dev + "_device_lbl"] = tk.Label(sensorframe[dev], bg="white", justify="left", font=medfont, text="Sensor ID: " + dev)
+    sensorwidget[dev + "_device_lbl"] = tk.Label(sensorframe[dev], bg="white", fg="black", justify="left", font=medfont, text="Sensor ID: " + dev)
     sensorwidget[dev + "_device_lbl"].grid(row=0, column=0, sticky="EW", columnspan = 2)
     #sensorwidget[dev + "_device_val"] = tk.Label(sensorframe[dev], bg="white", font=medfont, text=dev)
     #sensorwidget[dev + "_device_val"].grid(row=0, column=1, sticky="EW")
@@ -51,10 +51,10 @@ def reconfigureLayout(dev):
         valueframe = tk.Frame(sensorframe[dev], padx=2, pady=2)
         valueframe.grid(row=1, column=0, columnspan=2, rowspan=2, sticky="EW")
         
-        sensorwidget[dev+"_fullname_val"].config(bg="white")
+        sensorwidget[dev+"_fullname_val"].config(bg="white", fg="black")
         sensorwidget[dev+"_fullname_val"].grid(row=0, column=0, columnspan=2, sticky="EW")
         sensorwidget[dev+"_fullname_lbl"].config(text = "Sensor ID")
-        sensorwidget[dev+"_device_lbl"].config(text = dev, bg="white smoke")
+        sensorwidget[dev+"_device_lbl"].config(text = dev, bg="white smoke", fg="black")
         sensorwidget[dev+"_device_lbl"].grid(row=8, column=1, columnspan=1)
         
         sensorwidget[dev+"_temp_lbl"].destroy()
@@ -199,13 +199,14 @@ def getWiFi():
 # ************************* Main ****************************
 
 ssid = getWiFi()
+print("SSID:", ssid)
 
 if "UPC4E87B2D" in ssid:
     mqttBroker ="192.168.20.17"
 else:
     mqttBroker ="82.165.176.152"
 
-mqclient = mqtt.Client("DesktopGUI")
+mqclient = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, "DesktopGUI")
 mqclient.connect(mqttBroker)
 
 devices = list()
@@ -218,6 +219,11 @@ mqclient.on_message=on_message
 
 window = tk.Tk()
 window.title("BLE2MQTT GUI")
+
+style = ttk.Style(window)
+
+# Set the theme with the theme_use method
+# style.theme_use('aqua')  # put the theme name here, that you want to use
 
 greeting = tk.Label(text="Connected to MQTT-Broker: " + mqttBroker)
 greeting.pack()

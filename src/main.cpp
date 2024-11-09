@@ -5,6 +5,7 @@
 #include <aes/esp_aes.h>
 #include <array>
 
+#define S3
 #define WIFI
 #define MQTT
 bool DEBUG = false;
@@ -17,12 +18,21 @@ String version = "V2.3";
 #ifdef MQTT
 #include <PubSubClient.h>
 #endif
-
+#ifdef S3
+#define BUTTON1PIN 14
+#define BUTTON2PIN 0
+#else
 #define BUTTON1PIN 35
 #define BUTTON2PIN 0
+#endif
 
+#ifdef S3
+#define SCREEN_WIDTH  320
+#define SCREEN_HEIGHT 170
+#else
 #define SCREEN_WIDTH  240
 #define SCREEN_HEIGHT 135
+#endif
 
 #define GOVEE_BT_mac_OUI_PREFIX "a4:c1:38"
 #define H5075_UPDATE_UUID16  "88:ec"
@@ -783,6 +793,7 @@ void setup() {
   pinMode(BUTTON2PIN, INPUT);
 
   // Setup Display
+  Serial.println("Setup Display...");
   display.init();
   display.setRotation(1);
   display.setTextSize(1);
