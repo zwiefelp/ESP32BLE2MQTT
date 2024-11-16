@@ -11,6 +11,8 @@
 bool DEBUG = false;
 String version = "V2.3";
 
+#define CONFIG_ARDUINO_LOOP_STACK_SIZE 16384
+
 #ifdef WIFI
 #include <WiFi.h>
 #endif
@@ -37,7 +39,7 @@ String version = "V2.3";
 #define GOVEE_BT_mac_OUI_PREFIX "a4:c1:38"
 #define H5075_UPDATE_UUID16  "88:ec"
 #define VICTRON_BT_mac_OUI_PREFIX "60:a4:23"
-#define SMARTSOLAR_ENCRYPTION_KEY 0x0df4d0395b7d1a876c0c33ecb9e70aea
+#define SMARTSOLAR_ENCRYPTION_KEY "0x0df4d0395b7d1a876c0c33ecb9e70aea"
 #define VICTRON_ENCRYPTED_DATA_MAX_SIZE 16
 
 #define FINE_SCAN true
@@ -104,16 +106,16 @@ int num = 0;
 
 // Sensor
 struct tempSensor {
-  std::string mac;
-  std::string type;
-  std::string name;
+  std::string mac = "";
+  std::string type = "none";
+  std::string name = "none";
   std::string fullname = "none";
-  std::string device;
-  double temp;
-  double hum;
-  double bat;
-  int num;
-  int rssi;
+  std::string device = "none";
+  double temp = 0.0;
+  double hum = 0.0;
+  double bat = 0.0;
+  int num = 0;
+  int rssi = 0;
   int battype = 0; // 0=Volts, 1=Percent
   String lastupdate = "";
 };
@@ -441,11 +443,10 @@ bool decrypt_message_(const u_int8_t *crypted_data, const u_int8_t crypted_len,
                                   const u_int8_t data_counter_lsb, const u_int8_t data_counter_msb) {
   esp_aes_context ctx;
   esp_aes_init(&ctx);
-  unsigned char bindkey = (unsigned char) SMARTSOLAR_ENCRYPTION_KEY;
-  //std::array<uint8_t, 16> key;
-  //key = (std::array<uint8_t, 16>)(unsigned char) SMARTSOLAR_ENCRYPTION_KEY;
-  //bindkey = (std::array<uint8_t, 16>)SMARTSOLAR_ENCRYPTION_KEY;
-  auto status = esp_aes_setkey(&ctx, &bindkey, 16 * 8);
+  uint8_t bindkey[35];
+  memset( bindkey, 0, sizeof( bindkey ) );
+  strcpy( (char *) bindkey, SMARTSOLAR_ENCRYPTION_KEY);
+  auto status = esp_aes_setkey(&ctx, bindkey, 16 * 8);
   if (status != 0) {
     Serial.printf("Error during esp_aes_setkey operation (%i).", status);
     esp_aes_free(&ctx);
@@ -484,8 +485,8 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
     std::__cxx11::string data = advertisedDevice.getManufacturerData();
 
     u_int8_t *payload = advertisedDevice.getPayload();
-    int plength = advertisedDevice.getPayloadLength();
-    char spayload[plength];
+    int plength = advertisedDevice.getPayloadLength() ;
+    char spayload[plength + 1];
     memcpy(spayload, payload, plength);
 
     if (DEBUG) {
