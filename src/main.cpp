@@ -894,6 +894,10 @@ void setup() {
 }
 
 void loop() {
+  String topic = "";
+  String msg = "";
+  String dev = "";
+  
   // Scan for Sensors
   Serial.println("Start Scanning...");
   // non Blocking Scan
@@ -911,17 +915,14 @@ void loop() {
     if (!client.connected()) {
       mqttReconnect();
       if (client.connected()) {
-        String msg = "getconfig:"+client_id;
+        msg = "getconfig:"+client_id;
         client.publish(getconftopic.c_str(),msg.c_str());
       }
     } 
     // MQ Indikator anhand der Aktivität ändern
     
     if (client.connected()) {
-      String topic;
-      String msg;
-      String dev;
-
+     
       display_indicators(TFT_GREEN);
 
       for (tempSensor t : sensors) {
