@@ -206,7 +206,7 @@ if "UPC4E87B2D" in ssid:
 else:
     mqttBroker ="82.165.176.152"
 
-mqclient = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, "DesktopGUI")
+mqclient = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,"DesktopGUI")
 mqclient.connect(mqttBroker)
 
 devices = list()
@@ -282,6 +282,7 @@ debugprint("Start Loop...")
 mqclient.loop_start()
 debugprint("Subscribe...")
 mqclient.subscribe([(conftopic,0),(debugtopic,0),(basetopic,0)])
+debugprint("Open Window...")
 window.mainloop()
 mqclient.loop_stop()
 
