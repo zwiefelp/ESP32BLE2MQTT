@@ -1,15 +1,19 @@
 #include <list>
-#include "BLEDevice.h"
+#include <Arduino.h>
+#include <BLEDevice.h>
 #include <TFT_eSPI.h>
 #include <WiFiManager.h>
 #include <aes/esp_aes.h>
 #include <array>
 
-#define S3
+#if BOARD==ESP32S3
+  #define S3
+#endif 
+
 #define WIFI
 #define MQTT
 bool DEBUG = false;
-String version = "V2.3";
+String version = "V2.4";
 
 #define CONFIG_ARDUINO_LOOP_STACK_SIZE 16384
 
@@ -68,7 +72,7 @@ const unsigned char wifiicon[] PROGMEM  = {
 String basetopic = "/openhab/in/";
 String conftopic = "/openhab/configuration/";
 String getconftopic = "/openhab/configuration";
-String cmdtopic;
+String cmdtopic = "/openhab/configuration/cmd";
 String timetopic = "/openhab/Daytime";
 String datetopic = "/openhab/DayDate";
 String debugtopic = "/openhab/debug/";
@@ -76,9 +80,9 @@ String debugtopic = "/openhab/debug/";
 IPAddress broker_int(192,168,20,17);          // Address of the MQTT broker SSID=UPC4E87B2D
 IPAddress broker_ext(82,165,176,152);         
 IPAddress broker_openhab(192,168,1,1);        // Address of the MQTT broker SSID=OpenHAB
-IPAddress broker;
-String ssid;
-IPAddress ip;
+IPAddress broker(0,0,0,0);
+String ssid = "";
+IPAddress ip(0,0,0,0);
 
 WiFiClient wificlient;
 PubSubClient client(wificlient);
@@ -89,8 +93,8 @@ String mqtttime = "00:00";
 
 int MQ_COLOR = TFT_WHITE;
 
-u_int64_t espID;
-String client_id;
+u_int64_t espID = 0;
+String client_id = "000000";
 
 // Create object "tft"
 TFT_eSPI display = TFT_eSPI();
@@ -106,11 +110,11 @@ int num = 0;
 
 // Sensor
 struct tempSensor {
-  std::string mac = "";
-  std::string type = "none";
-  std::string name = "none";
-  std::string fullname = "none";
-  std::string device = "none";
+  std::string mac = "00:00:00:00:00:00";
+  String type = "none";
+  String name = "none";
+  String fullname = "none";
+  String device = "none";
   double temp = 0.0;
   double hum = 0.0;
   double bat = 0.0;
@@ -121,21 +125,24 @@ struct tempSensor {
 };
 
 std::list<tempSensor> sensors;
-
+#ifdef C11
 std::__cxx11::string string_to_hex(const std::__cxx11::string& input, int length = 0)
+#else
+String string_to_hex(const String& input, int length = 0)
+#endif
 {
     static const char hex_digits[] = "0123456789ABCDEF:";
 
-    std::string output;
+    String output = "";
     if (length == 0) length = input.length();
     output.reserve(length * 3);
 
     for (int i=0; i < length; i++)
     {
         unsigned char c = input[i];
-        output.push_back(hex_digits[c >> 4]);
-        output.push_back(hex_digits[c & 15]);
-        output.push_back(hex_digits[16]);
+        output = output + hex_digits[c >> 4];
+        output = output + hex_digits[c & 15];
+        output = output + hex_digits[16];
     }
     return output;
 }
@@ -143,14 +150,20 @@ std::__cxx11::string string_to_hex(const std::__cxx11::string& input, int length
 /**
  * Print Debug Output to Serial and/or MQTT
 **/
-void debugPrintln(std::__cxx11::string msg) {
-  if (client.connected()) {
-    client.publish(debugtopic.c_str(), msg.c_str());
-  }
+#ifdef C11
+void debugPrintln(std::__cxx11::string msg) 
+#else
+int debugPrintln(String msg) 
+#endif
+{
+  //if (client.connected()) {
+  //  client.publish(debugtopic.c_str(), msg.c_str());
+  //}
   Serial.println(msg.c_str());
+  return 1;
 }
 
-tempSensor getSensor(std::string mac, std::string name) {
+tempSensor getSensor(std::string mac, String name) {
   for (tempSensor t : sensors) {
     if (t.mac == mac) return t;
   }
@@ -184,7 +197,7 @@ tempSensor getSensor(int n) {
   return t1;
 }
 
-void setSensor(std::string mac, std::string type, double temp, double hum, double bat, int rssi, int battype) {
+void setSensor(std::string mac, String type, double temp, double hum, double bat, int rssi, int battype) {
   for (auto it = sensors.rbegin(); it != sensors.rend(); it++) {
     if (it->mac == mac) {
       it->type = type;
@@ -199,7 +212,7 @@ void setSensor(std::string mac, std::string type, double temp, double hum, doubl
   }
 }
 
-void setSensorName(std::string device, std::string fullname) {
+void setSensorName(String device, String fullname) {
   for (auto it = sensors.rbegin(); it != sensors.rend(); it++) {
     if (it->device == device) {
       it->fullname = fullname;
@@ -480,43 +493,58 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
     int battype;
 
     int rssi = advertisedDevice.getRSSI();
-    std::__cxx11::string mac = advertisedDevice.getAddress().toString();
-    std::__cxx11::string name = advertisedDevice.getName();
-    std::__cxx11::string data = advertisedDevice.getManufacturerData();
+
+    std::string mac = advertisedDevice.getAddress().toString();
+    std::string strname = advertisedDevice.getName();
+    std::string strdata = advertisedDevice.getManufacturerData();
+
+    char cname[strname.length()];
+    strname.copy(cname, strname.length(), 0);
+    //cname[strname.length()] = '\0';
+
+    char cdata[strdata.length()];
+    strdata.copy(cdata, strdata.length(), 0);
+    //cdata[strdata.length()] = '\0';
+
+    //String name = String(cname);
+    //String data = String(cdata);
 
     u_int8_t *payload = advertisedDevice.getPayload();
     int plength = advertisedDevice.getPayloadLength() ;
     char spayload[plength + 1];
     memcpy(spayload, payload, plength);
 
+
+
     if (DEBUG) {
-      debugPrintln("Found Device Advertisement. Mac-Address=" + mac);
-      debugPrintln("Manufacturer=" + mac.substr(0,8) + " - Device Name: " + advertisedDevice.getName());
-      debugPrintln("Manufacturer Data, length=" + std::to_string(data.size()));
-      debugPrintln(string_to_hex(data.c_str(), data.length()));
+      debugPrintln("Found Device Advertisement. Mac-Address=" + String(mac.c_str()));
+      debugPrintln("Name lenght=" + String(strname.length()) + ", Data length=" + String(strdata.length()));
+      debugPrintln("Name: " + string_to_hex(cname, strname.length()));     
+      //debugPrintln("Manufacturer=" + mac.substring(0,8) + " - Device Name: " + name);
+      //debugPrintln("Manufacturer Data length=" + strdata.length());
+      debugPrintln("Data: " + string_to_hex(cdata, strdata.length()));
       
       spayload[plength] = '\0';
 
-      debugPrintln("Payload Raw: length=" + std::to_string(plength));
-      Serial.println(spayload);
-      //debugPrintln("Payload Hex:");
-      debugPrintln(string_to_hex(spayload, plength));
+      debugPrintln("Payload Raw - length=" + String(plength));
+      //Serial.println(spayload);
+      debugPrintln("Payload: " + string_to_hex(spayload, plength));
       //Serial.print("Manufacturer Key: ");
-      //Serial.println(string_to_hex(spayload, plength).substr(69,5).c_str());
+      //Serial.println(string_to_hex(spayload, plength).substring(69,5).c_str());
     }
     /*
     *     ThermoBeacon
     *
     */
-    if (name == "ThermoBeacon") { //Check if the name of the advertiser matches   
+    if (strname == "ThermoBeacon") { //Check if the name of the advertiser matches   
 
-      if (data.length() == 20) {
+      if (strdata.length() == 20) {
         Serial.print("ThermoBeacon Data Received: ");
         Serial.println(mac.c_str());
 
-        t = getSensor(mac,name);
+        t = getSensor(mac,"ThermoBeacon");
         if (t.type == "new") {
-          Serial.printf("Found New Sensor: %s Type=ThermoBeacon count=",name.c_str());
+          Serial.printf("Found New Sensor: %s Type=ThermoBeacon count=",strname);
           Serial.println(sensors.size());
         }
         /* 
@@ -527,10 +555,10 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
         Serial.print("New Temperature=");
         Serial.println(ntemp);
         */
-        temp = ((double)data[12] + 256 * (double)data[13]) / 16;
+        temp = ((double)cdata[12] + 256 * (double)cdata[13]) / 16;
         if (temp > 4000) temp = temp - 4096;         
-        hum = ((double)data[14] + 256 * (double)data[15]) / 16;
-        bat = ((double)data[10] + 256 *(double)data[11]) / 1000;
+        hum = ((double)cdata[14] + 256 * (double)cdata[15]) / 16;
+        bat = ((double)cdata[10] + 256 *(double)cdata[11]) / 1000;
         battype = BAT_VOLT;
 
         setSensor(mac,"ThermoBeacon",temp,hum,bat,rssi,battype);
@@ -541,7 +569,7 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
           num = t.num;
         }
       }
-      if (data.length() == 22) {
+      if (strdata.length() == 22) {
  
       }
     }
@@ -549,7 +577,7 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
     *     Govee H5075
     *
     */
-    if (mac.substr(0,8) == GOVEE_BT_mac_OUI_PREFIX && data.length() > 15 ) { //data.lengh() == 17 ??
+    if (mac.substr(0,8) == GOVEE_BT_mac_OUI_PREFIX && strdata.length() > 15 ) { //data.lengh() == 17 ??
       Serial.print("Govee H5075 Data Received: ");
       Serial.println(mac.c_str());
 
@@ -571,9 +599,9 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
       bat = (double)spayload[29];
       battype = BAT_PERCENT;
 
-      t = getSensor(mac,name);
+      t = getSensor(mac,"Govee H5075");
       if (t.type == "new") {
-        Serial.printf("Found New Sensor: %s Type=H5075 count=", name.c_str());
+        Serial.printf("Found New Sensor: %s Type=H5075 count=", strname);
         Serial.println(sensors.size());
       }
 
@@ -593,12 +621,11 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
     if (mac.substr(0,8) == VICTRON_BT_mac_OUI_PREFIX) {
       Serial.print("Victron Data Received: ");
       Serial.println(mac.c_str());
-      char recordtype = data[0];
-      u_int16_t noonce = data[1] + 256 * data[2];
-      char byte0 = data[3];
-
-      debugPrintln("Received Victron Data: Recordtype=" + std::to_string(recordtype));
-      debugPrintln("  noonce=" + std::to_string(noonce) + " byte0=" + std::to_string(byte0));
+      char recordtype = cdata[0];
+      u_int16_t noonce = cdata[1] + 256 * cdata[2];
+      char byte0 = cdata[3];
+      debugPrintln("Received Victron Data: Recordtype=" + recordtype);
+      debugPrintln("  noonce=" + String(noonce) + " byte0=" + byte0);
 
       if (recordtype == 0x01) { // Solar Charger
         u_int8_t *data;
@@ -646,8 +673,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   char delimiter[] = ":";
   char *ptr;
   char temp[50];
-  std::string device;
-  std::string fullname;
+  String device;
+  String fullname;
 
   Serial.print("Message arrived [");
   Serial.print(topic);
@@ -895,6 +922,10 @@ void setup() {
 }
 
 void loop() {
+  String topic = "";
+  String msg = "";
+  String dev = "";
+  
   // Scan for Sensors
   Serial.println("Start Scanning...");
   // non Blocking Scan
@@ -912,17 +943,14 @@ void loop() {
     if (!client.connected()) {
       mqttReconnect();
       if (client.connected()) {
-        String msg = "getconfig:"+client_id;
+        msg = "getconfig:"+client_id;
         client.publish(getconftopic.c_str(),msg.c_str());
       }
     } 
     // MQ Indikator anhand der Aktivität ändern
     
     if (client.connected()) {
-      String topic;
-      String msg;
-      String dev;
-
+     
       display_indicators(TFT_GREEN);
 
       for (tempSensor t : sensors) {
