@@ -6,3 +6,4 @@
 dist/BLE2MQTT_gui/_internal
 build
 *.spec
+.DS_Store
