@@ -883,7 +883,7 @@ void setup() {
 
   bool res;
   wm.setConnectTimeout(10);
-  res = wm.autoConnect("BLE2MQTT","password");
+  res = wm.autoConnect("BLE2MQTT");   // offener Konfig-AP, kein Passwort
   if (!res) {
     Serial.println("Failed to connect to WiFi!");
   }
