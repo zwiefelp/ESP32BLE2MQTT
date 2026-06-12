@@ -220,8 +220,8 @@ mqclient.on_message=on_message
 window = tk.Tk()
 window.title("BLE2MQTT GUI")
 
-style = ttk.Style(window)
-
+# style = ttk.Style(window)
+# style.theme_use('darkly')
 # Set the theme with the theme_use method
 # style.theme_use('aqua')  # put the theme name here, that you want to use
 
@@ -251,9 +251,9 @@ breconfig.pack(padx=2, pady=2, side="right")
 buttonframe.pack(fill="x")
 
 tabControl = ttk.Notebook(window)
-mqtttab = ttk.Frame(tabControl)
-logtab = ttk.Frame(tabControl)
-sensortab = ttk.Frame(tabControl)
+mqtttab = tk.Frame(tabControl)
+logtab = tk.Frame(tabControl)
+sensortab = tk.Frame(tabControl)
 
 tabControl.add(mqtttab, text=' MQTT Messages ')
 tabControl.add(sensortab, text=' Sensors ')
@@ -287,4 +287,3 @@ window.mainloop()
 mqclient.loop_stop()
 
 debugprint("Stop Loop...")
-
