@@ -479,7 +479,7 @@ bool decrypt_message_(const u_int8_t *crypted_data, const u_int8_t crypted_len,
 
   esp_aes_free(&ctx);
   Serial.printf("Enrypted message: %s",
-           string_to_hex((char *)encrypted_data, crypted_len));
+           string_to_hex((char *)encrypted_data, crypted_len).c_str());
   return true;
 }
 
@@ -498,13 +498,13 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
     std::string strname = advertisedDevice.getName();
     std::string strdata = advertisedDevice.getManufacturerData();
 
-    char cname[strname.length()];
+    char cname[strname.length() + 1];
     strname.copy(cname, strname.length(), 0);
-    //cname[strname.length()] = '\0';
+    cname[strname.length()] = '\0';
 
-    char cdata[strdata.length()];
+    char cdata[strdata.length() + 1];
     strdata.copy(cdata, strdata.length(), 0);
-    //cdata[strdata.length()] = '\0';
+    cdata[strdata.length()] = '\0';
 
     //String name = String(cname);
     //String data = String(cdata);
@@ -544,7 +544,7 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
 
         t = getSensor(mac,"ThermoBeacon");
         if (t.type == "new") {
-          Serial.printf("Found New Sensor: %s Type=ThermoBeacon count=",strname);
+          Serial.printf("Found New Sensor: %s Type=ThermoBeacon count=",strname.c_str());
           Serial.println(sensors.size());
         }
         /* 
@@ -587,7 +587,12 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
       // 0D:09:47:56:48:35:30:37:35:5F:33:32:37:37:03:03:88:EC:02:01:05:09:FF:88:EC:38:03:46:0B:64: (58)
       // 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30
 
-      u_int32_t value = spayload[26] * 65535 + spayload[27] * 256 + spayload[28];
+      if (plength < 30) {
+        if (DEBUG) debugPrintln("Govee payload too short (" + String(plength) + "), skipping");
+        return;
+      }
+
+      u_int32_t value = (u_int8_t)spayload[26] * 65536 + (u_int8_t)spayload[27] * 256 + (u_int8_t)spayload[28];
 
       // Precision für %.1f für temp und hum
       if (value & 0x800000) {
@@ -596,12 +601,12 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
         temp = (double)value / 10000.0;
       }
       hum = (double)(value % 1000) / 10.0;
-      bat = (double)spayload[29];
+      bat = (double)(u_int8_t)spayload[29];
       battype = BAT_PERCENT;
 
       t = getSensor(mac,"Govee H5075");
       if (t.type == "new") {
-        Serial.printf("Found New Sensor: %s Type=H5075 count=", strname);
+        Serial.printf("Found New Sensor: %s Type=H5075 count=", strname.c_str());
         Serial.println(sensors.size());
       }
 
@@ -666,7 +671,7 @@ void IRAM_ATTR toggleButton2() {
 
 #ifdef MQTT
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
-  char spayload[length];
+  char spayload[length + 1];
   memcpy(spayload, payload, length);
   spayload[length] = '\0';
   String msg;
