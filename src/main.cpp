@@ -35,9 +35,15 @@ String version = "V2.4";
 #ifdef S3
 #define SCREEN_WIDTH  320
 #define SCREEN_HEIGHT 170
+#define COL2_X    160   // x der rechten Wertespalte (Feuchte/RSSI)
+#define ROW_STEP  40    // vertikaler Zeilenabstand
+#define MARGIN_X  10    // Abstand vom linken Displayrand (nur S3)
 #else
 #define SCREEN_WIDTH  240
 #define SCREEN_HEIGHT 135
+#define COL2_X    130
+#define ROW_STEP  34
+#define MARGIN_X  0
 #endif
 
 #define GOVEE_BT_mac_OUI_PREFIX "a4:c1:38"
@@ -231,10 +237,10 @@ void display_indicators() {
     col = TFT_RED;
   }
   #endif 
-  display.drawBitmap(240 - 50, 2, wifiicon,16,16,col);
+  display.drawBitmap(SCREEN_WIDTH - 50, 2, wifiicon,16,16,col);
   display.setTextColor(MQ_COLOR, TFT_BLACK);
   display.setTextFont(2);
-  display.setCursor(240 - 20, 0);
+  display.setCursor(SCREEN_WIDTH - 20, 0);
   display.print("MQ");
   display.setTextColor(TFT_WHITE);
 }
@@ -253,8 +259,8 @@ void displayDateTime() {
   }
     
   uint8_t y = 0;
-  uint8_t d = 34;
-  uint8_t x = 0;
+  uint8_t d = ROW_STEP;
+  uint8_t x = MARGIN_X;
 
   // display sensor numbers
   display.setTextColor(TFT_WHITE, TFT_BLACK);
@@ -271,7 +277,7 @@ void displayDateTime() {
   display_indicators();
 
   // display Time
-  x=0;
+  x = MARGIN_X;
   y=24;
   display.setTextColor(TFT_WHITE, TFT_BLACK);
   display.setTextSize(1);
@@ -279,25 +285,33 @@ void displayDateTime() {
   display.setCursor(x,y);
   display.printf("Device: %s",client_id.c_str());
 
-  x = 50;
   y=y+22;
   display.setTextColor(TFT_SKYBLUE, TFT_BLACK);
   display.setTextSize(1);
   display.setTextFont(6);
+  #ifdef S3
+  x = (SCREEN_WIDTH - display.textWidth(mqtttime.c_str())) / 2;
+  #else
+  x = 50;
+  #endif
   display.setCursor(x,y);
   display.printf(mqtttime.c_str());
 
   // display Date
-  x = 30;
   y=y+d+12;
   display.setTextColor(TFT_WHITE, TFT_BLACK);
   display.setTextSize(1);
   display.setTextFont(4);
+  #ifdef S3
+  x = (SCREEN_WIDTH - display.textWidth(mqttdate.c_str())) / 2;
+  #else
+  x = 30;
+  #endif
   display.setCursor(x,y);
   display.printf(mqttdate.c_str());
 
     // display WiFi
-  x = 0;
+  x = MARGIN_X;
   y=y+26;
   display.setTextColor(TFT_WHITE, TFT_BLACK);
   display.setTextSize(1);
@@ -317,8 +331,8 @@ void displayScreen(tempSensor t) {
   }
 
   uint8_t y = 0;
-  uint8_t d = 34;
-  uint8_t x = 0;
+  uint8_t d = ROW_STEP;
+  uint8_t x = MARGIN_X;
 
   // display sensor numbers
   display.setTextColor(TFT_WHITE, TFT_BLACK);
@@ -335,7 +349,7 @@ void displayScreen(tempSensor t) {
   display_indicators();
 
   // display device
-  x=0;
+  x = MARGIN_X;
   y=22;
   display.setTextColor(TFT_WHITE, TFT_BLACK);
   display.setTextSize(1);
@@ -368,8 +382,8 @@ void displayScreen(tempSensor t) {
     display.printf(".%01dC",(int)(value*10.0));
   }
   
-  //display humidity 
-  x=x+130;
+  //display humidity
+  x = COL2_X;
   display.setTextColor(TFT_SKYBLUE, TFT_BLACK);
   display.setCursor(x, y);
   display.setTextFont(6);
@@ -378,7 +392,7 @@ void displayScreen(tempSensor t) {
   display.printf(".%02u%%",int((t.hum - int(t.hum))*100));
 
   //display Battery
-  x=0;
+  x = MARGIN_X;
   y=y+d+5;
   display.setTextColor(TFT_GREEN, TFT_BLACK);
   display.setTextSize(1);
@@ -401,7 +415,7 @@ void displayScreen(tempSensor t) {
   }
 
   //display RSSI
-  x=130;
+  x = COL2_X;
   display.setTextColor(TFT_GREEN, TFT_BLACK);
   display.setTextSize(1);
   display.setTextFont(2);
@@ -409,6 +423,17 @@ void displayScreen(tempSensor t) {
   display.printf("RSSI: ");
   display.setTextFont(4);
   display.printf("%02ddb", t.rssi);
+
+  #ifdef S3
+  // Lastupdate in der gewonnenen unteren Flaeche (volle Breite)
+  x = MARGIN_X;
+  y = SCREEN_HEIGHT - 18;
+  display.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  display.setTextSize(1);
+  display.setTextFont(2);
+  display.setCursor(x, y);
+  display.printf("Update: %s", t.lastupdate.c_str());
+  #endif
 
   display.setTextFont(0);
   display.setTextSize(1);
