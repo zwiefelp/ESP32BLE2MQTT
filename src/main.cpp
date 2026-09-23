@@ -1,7 +1,11 @@
 #include <list>
 #include <Arduino.h>
 #include <BLEDevice.h>
+#ifdef EPAPER
+#include "epd_display.h"
+#else
 #include <TFT_eSPI.h>
+#endif
 #include <WiFiManager.h>
 #include <aes/esp_aes.h>
 #include <array>
@@ -24,7 +28,24 @@ String version = "V2.5";
 #ifdef MQTT
 #include <PubSubClient.h>
 #endif
-#ifdef S3
+// e-Paper zeichnet in einen Framebuffer und muss explizit aufs Panel
+// geschoben werden; beim TFT ist das ein No-Op.
+#ifdef EPAPER
+#define DISPLAY_FLUSH() display.flush()
+#else
+#define DISPLAY_FLUSH() ((void)0)
+#endif
+
+#if defined(EPAPER)
+  // Generisches ESP32-S3-DevKit: Button2 ist der BOOT-Taster, Button1 ein
+  // externer Taster gegen GND (interner Pullup). Per build_flags aenderbar.
+  #ifndef BUTTON1PIN
+  #define BUTTON1PIN 14
+  #endif
+  #ifndef BUTTON2PIN
+  #define BUTTON2PIN 0
+  #endif
+#elif defined(S3)
 #define BUTTON1PIN 14
 #define BUTTON2PIN 0
 #else
@@ -32,18 +53,34 @@ String version = "V2.5";
 #define BUTTON2PIN 0
 #endif
 
-#ifdef S3
+#if defined(EPAPER)
+// 200x200 ist quadratisch statt quer: die Werte stehen untereinander (nicht
+// in zwei Spalten) und dafuer deutlich groesser. Die Y-Werte unten sind die
+// Zeilenoberkanten des Layouts, siehe displayScreen()/displayDateTime().
+#define SCREEN_WIDTH  200
+#define SCREEN_HEIGHT 200
+#define MARGIN_X  4     // Abstand vom linken Displayrand
+#define IND_ICON_X (SCREEN_WIDTH - 50)
+#define IND_MQ_X   (SCREEN_WIDTH - 30)
+#define EPD_DOT_STEP 14 // Abstand der Screen-Punkte in der Kopfzeile
+#define EPD_Y_RULE   20 // Trennlinie unter der Kopfzeile
+#define EPD_Y_FOOT  178 // Trennlinie ueber der Fusszeile
+#elif defined(S3)
 #define SCREEN_WIDTH  320
 #define SCREEN_HEIGHT 170
 #define COL2_X    160   // x der rechten Wertespalte (Feuchte/RSSI)
 #define ROW_STEP  40    // vertikaler Zeilenabstand
 #define MARGIN_X  10    // Abstand vom linken Displayrand (nur S3)
+#define IND_ICON_X (SCREEN_WIDTH - 50)
+#define IND_MQ_X   (SCREEN_WIDTH - 20)
 #else
 #define SCREEN_WIDTH  240
 #define SCREEN_HEIGHT 135
 #define COL2_X    130
 #define ROW_STEP  34
 #define MARGIN_X  0
+#define IND_ICON_X (SCREEN_WIDTH - 50)
+#define IND_MQ_X   (SCREEN_WIDTH - 20)
 #endif
 
 #define GOVEE_BT_mac_OUI_PREFIX "a4:c1:38"
@@ -103,7 +140,11 @@ u_int64_t espID = 0;
 String client_id = "000000";
 
 // Create object "tft"
+#ifdef EPAPER
+EpdDisplay display;
+#else
 TFT_eSPI display = TFT_eSPI();
+#endif
 bool displayON = true;
 
 //Declare BLEScanner
@@ -227,6 +268,8 @@ void setSensorName(String device, String fullname) {
   }
 }
 
+void displaySensor(int i);
+
 void display_indicators() {
   //display WiFI & MQTT Connection
   u_int16_t col = TFT_WHITE;
@@ -237,24 +280,211 @@ void display_indicators() {
     col = TFT_RED;
   }
   #endif 
-  display.drawBitmap(SCREEN_WIDTH - 50, 2, wifiicon,16,16,col);
+  display.drawBitmap(IND_ICON_X, 2, wifiicon,16,16,col);
   display.setTextColor(MQ_COLOR, TFT_BLACK);
   display.setTextFont(2);
-  display.setCursor(SCREEN_WIDTH - 20, 0);
+  display.setCursor(IND_MQ_X, 0);
   display.print("MQ");
   display.setTextColor(TFT_WHITE);
+  #ifdef EPAPER
+  // Monochrom: der Zustand laesst sich nicht ueber die Farbe zeigen,
+  // deshalb wird "nicht verbunden" durchgestrichen dargestellt.
+  if (col == TFT_RED) display.drawFastHLine(IND_ICON_X, 10, 16, TFT_WHITE);
+  if (MQ_COLOR == TFT_RED) display.drawFastHLine(IND_MQ_X, 9, 29, TFT_WHITE);
+  #endif
 }
 
 void display_indicators(int col) {
   MQ_COLOR = col;
+  #ifdef EPAPER
+  // Auf e-Paper ist nur ein vollstaendiger Frame mit dem vorherigen
+  // vergleichbar - deshalb den ganzen Screen neu aufbauen. flush()
+  // unterdrueckt den Refresh, wenn sich das Bild nicht geaendert hat.
+  displaySensor(num);
+  #else
   display_indicators();
+  #endif
 }
+
+#ifdef EPAPER
+// ---------------------------------------------------------------------------
+// Layout fuer das 200x200-e-Paper
+// ---------------------------------------------------------------------------
+
+// Kuerzt s so weit, bis es in maxW Pixel passt (Schrift vorher setzen).
+static String epdFit(const String& s, int16_t maxW) {
+  String out = s;
+  while (out.length() > 1 && display.textWidth(out) > maxW) {
+    out.remove(out.length() - 1);
+  }
+  return out;
+}
+
+// Kopfzeile: Screen-Punkte links, WLAN/MQTT-Indikatoren rechts, Trennlinie.
+static void epdHeader(int active) {
+  display.setTextColor(TFT_WHITE, TFT_BLACK);
+  display.setTextFont(0);
+  display.setTextSize(2);
+  for (int i = 0; i <= (int)sensors.size(); i++) {
+    int16_t x = MARGIN_X + i * EPD_DOT_STEP;
+    if (x + EPD_DOT_STEP > IND_ICON_X) break;   // nicht in die Indikatoren laufen
+    display.setCursor(x, 2);
+    display.print(i == active ? "o" : ".");
+  }
+  display.setTextSize(1);
+  display_indicators();
+  display.drawFastHLine(0, EPD_Y_RULE, SCREEN_WIDTH, TFT_WHITE);
+}
+
+// Gesamtbreite eines Wertes aus epdValue() - fuer rechtsbuendige Platzierung.
+static int16_t epdValueWidth(const char* big, const char* small) {
+  display.setTextFont(6);
+  int16_t w = display.textWidth(big);
+  display.setTextFont(4);
+  return w + display.textWidth(small);
+}
+
+// Grosse Zahl mit kleinerem Nachkomma-/Einheitenteil. Beide Teile werden auf
+// der Grundlinie ausgerichtet, nicht oben buendig - sonst klebt die kleine
+// Schrift am oberen Rand der grossen Ziffern.
+static void epdValue(int16_t x, int16_t y, const char* big, const char* small) {
+  display.setTextColor(TFT_WHITE, TFT_BLACK);
+  display.setTextFont(6);
+  int16_t baseline = y + display.fontAscent();
+  display.setCursor(x, y);
+  display.print(big);
+  int16_t xs = display.getCursorX();
+  display.setTextFont(4);
+  display.setCursor(xs, baseline - display.fontAscent());
+  display.print(small);
+}
+
+// Fusszeile ueber einer Trennlinie, immer in der kleinsten Schrift.
+static void epdFooter(const String& text) {
+  display.drawFastHLine(0, EPD_Y_FOOT, SCREEN_WIDTH, TFT_WHITE);
+  display.setTextColor(TFT_WHITE, TFT_BLACK);
+  display.setTextFont(0);
+  display.setTextSize(1);
+  display.setCursor(MARGIN_X, EPD_Y_FOOT + 6);
+  display.print(epdFit(text, SCREEN_WIDTH - 2 * MARGIN_X));
+}
+
+void displayDateTime() {
+  display.fillScreen(TFT_BLACK);
+
+  if (!displayON) {
+    display_indicators();
+    DISPLAY_FLUSH();
+    return;
+  }
+
+  epdHeader(0);
+
+  const int16_t maxW = SCREEN_WIDTH - 2 * MARGIN_X;
+
+  display.setTextColor(TFT_WHITE, TFT_BLACK);
+  display.setTextFont(0);
+  display.setTextSize(1);
+  display.setCursor(MARGIN_X, 25);
+  display.print(epdFit("Device: " + client_id, maxW));
+
+  // Uhrzeit - das groesste Element, zentriert
+  display.setTextFont(6);
+  display.setCursor((SCREEN_WIDTH - display.textWidth(mqtttime)) / 2, 44);
+  display.print(mqtttime);
+
+  // Datum darunter, ebenfalls zentriert
+  display.setTextFont(4);
+  display.setCursor((SCREEN_WIDTH - display.textWidth(mqttdate)) / 2, 90);
+  display.print(mqttdate);
+
+  // Netzwerk - je Angabe eine eigene Zeile, sonst wird es auf 200px zu breit
+  display.setTextFont(2);
+  display.setCursor(MARGIN_X, 122);
+  display.print(epdFit("SSID: " + ssid, maxW));
+  display.setCursor(MARGIN_X, 140);
+  display.print(epdFit("IP:   " + ip.toString(), maxW));
+  display.setCursor(MARGIN_X, 158);
+  display.print("Sensoren: " + String((unsigned)sensors.size()));
+
+  epdFooter("BLE2MQTT " + version);
+
+  DISPLAY_FLUSH();
+}
+
+void displayScreen(tempSensor t) {
+  display.fillScreen(TFT_BLACK);
+
+  if (!displayON) {
+    display_indicators();
+    DISPLAY_FLUSH();
+    return;
+  }
+
+  epdHeader(t.num);
+
+  const int16_t maxW = SCREEN_WIDTH - 2 * MARGIN_X;
+  char big[16], small[16];
+
+  // Geraetenummer und Sensortyp
+  display.setTextColor(TFT_WHITE, TFT_BLACK);
+  display.setTextFont(0);
+  display.setTextSize(1);
+  display.setCursor(MARGIN_X, 25);
+  display.print(epdFit("Device " + String(t.num) + " (" + t.type + ")", maxW));
+
+  // Klarname, ersatzweise die MAC
+  display.setTextFont(2);
+  display.setCursor(MARGIN_X, 36);
+  display.print(epdFit(t.fullname == "none" ? String(t.mac.c_str()) : t.fullname, maxW));
+
+  // Temperatur
+  int sign = (t.temp < 0.0) ? -1 : 1;
+  double frac = (t.temp - int(t.temp)) * sign;
+  snprintf(big, sizeof(big), "%d", (int)t.temp);
+  if (t.type == "ThermoBeacon") {
+    snprintf(small, sizeof(small), ".%02d C", (int)(frac * 100.0));
+  } else {
+    snprintf(small, sizeof(small), ".%01d C", (int)(frac * 10.0));
+  }
+  epdValue(MARGIN_X, 54, big, small);
+
+  // Luftfeuchte - rechtsbuendig und tiefer, also diagonal zur Temperatur.
+  // Der Platz dafuer kommt aus der zusammengelegten Bat/RSSI-Zeile.
+  snprintf(big, sizeof(big), "%d", (int)t.hum);
+  snprintf(small, sizeof(small), ".%02u %%", (unsigned)((t.hum - int(t.hum)) * 100));
+  epdValue(SCREEN_WIDTH - MARGIN_X - epdValueWidth(big, small), 108, big, small);
+
+  // Batterie und Empfangsstaerke teilen sich eine Zeile: links bzw. rechts
+  // buendig, damit sie bei langen Werten nicht kollidieren.
+  display.setTextFont(2);
+  String bat;
+  switch (t.battype) {
+    case BAT_VOLT:    bat = "Bat: " + String(t.bat, 2) + "V"; break;
+    case BAT_PERCENT: bat = "Bat: " + String((int)t.bat) + "%"; break;
+    default: break;
+  }
+  // Ohne "db": mit Einheit stossen die beiden Werte bei "Bat: 2.75V" und
+  // "RSSI: -100" exakt aneinander. Die Einheit von RSSI ist ohnehin klar.
+  String rssi = "RSSI: " + String(t.rssi);
+  display.setCursor(MARGIN_X, 154);
+  display.print(bat);
+  display.setCursor(SCREEN_WIDTH - MARGIN_X - display.textWidth(rssi), 154);
+  display.print(rssi);
+
+  epdFooter("Update: " + t.lastupdate);
+
+  DISPLAY_FLUSH();
+}
+
+#else   // ------------------------------- TFT-Layout (unveraendert) --------
 
 void displayDateTime() {
   display.fillScreen(TFT_BLACK);
   
   if (!displayON) {
     display_indicators();
+    DISPLAY_FLUSH();
     return;
   }
     
@@ -319,6 +549,8 @@ void displayDateTime() {
   display.setCursor(x,y);
   //wifi_power_t tx = WiFi.getTxPower();
   display.printf("%s - %s",ssid.c_str(),ip.toString().c_str());
+
+  DISPLAY_FLUSH();
 }
 
 //function that prints the latest sensor readings in the OLED display
@@ -327,6 +559,7 @@ void displayScreen(tempSensor t) {
 
   if (!displayON) {
     display_indicators();
+    DISPLAY_FLUSH();
     return;
   }
 
@@ -437,7 +670,11 @@ void displayScreen(tempSensor t) {
 
   display.setTextFont(0);
   display.setTextSize(1);
+
+  DISPLAY_FLUSH();
 }
+
+#endif  // EPAPER
 
 void displaySensor(std::string mac) {
   displayScreen(getSensor(mac));
@@ -449,6 +686,36 @@ void displaySensor(int i){
   } else {
     displayScreen(getSensor(i));
   }
+}
+
+#ifdef EPAPER
+// Ein e-Paper-Refresh dauert mehrere hundert Millisekunden und braucht viel
+// Stack (Float-printf zieht ueber _dtoa_r einige hundert Byte). Weder der
+// Tasten-Interrupt noch der BLE-Callback duerfen deshalb selbst zeichnen:
+// der eine laeuft im Interrupt, der andere auf dem knappen Stack des
+// Bluetooth-Tasks (BTC_TASK). Beide merken den Wunsch nur vor, gezeichnet
+// wird in serviceDisplay() aus dem Loop-Task heraus.
+volatile bool displayDirty = false;
+#endif
+
+// Aufgeschobene Neuzeichnung abarbeiten (nur e-Paper, sonst No-Op).
+void serviceDisplay() {
+#ifdef EPAPER
+  if (displayDirty) {
+    displayDirty = false;
+    displaySensor(num);
+  }
+#endif
+}
+
+// Screen dieses Sensors anzeigen - wird aus dem BLE-Callback aufgerufen.
+static void requestSensorScreen(const tempSensor& t) {
+  num = t.num;
+#ifdef EPAPER
+  displayDirty = true;
+#else
+  displaySensor(t.num);
+#endif
 }
 
 void printReadings(double temp, double hum, double bat, int rssi, int battype) {
@@ -590,8 +857,7 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
         printReadings(temp,hum,bat,rssi,battype);
 
         if (t.type == "new" || t.num == num) {
-          displaySensor(mac);
-          num = t.num;
+          requestSensorScreen(t);
         }
       }
       if (strdata.length() == 22) {
@@ -639,8 +905,7 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
       printReadings(temp,hum,bat,rssi,battype);
 
       if (t.type == "new" || t.num == num) {
-        displaySensor(mac);
-        num = t.num;
+        requestSensorScreen(t);
       }
     }
     /*
@@ -668,7 +933,21 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
   }
 };
 
+#ifdef EPAPER
+volatile uint32_t lastButtonMillis = 0;
+
+#define BUTTON_ENTER()                                   \
+  uint32_t _now = millis();                              \
+  if (_now - lastButtonMillis < 300) return;             \
+  lastButtonMillis = _now;
+#define BUTTON_REDRAW() displayDirty = true
+#else
+#define BUTTON_ENTER()
+#define BUTTON_REDRAW() displaySensor(num)
+#endif
+
 void IRAM_ATTR toggleButton1() {
+  BUTTON_ENTER();
   if (!displayON) {
     displayON = true;
   } else {
@@ -678,10 +957,11 @@ void IRAM_ATTR toggleButton1() {
       num = 0;
     }
   }
-  displaySensor(num);
+  BUTTON_REDRAW();
 }
 
 void IRAM_ATTR toggleButton2() {
+  BUTTON_ENTER();
   if (!displayON) {
     displayON = true;
   } else {
@@ -691,7 +971,7 @@ void IRAM_ATTR toggleButton2() {
       num = sensors.size();
     }
   }
-  displaySensor(num);
+  BUTTON_REDRAW();
 }
 
 #ifdef MQTT
@@ -847,8 +1127,13 @@ void setup() {
   Serial.println(version);
 
   // Setup Buttons
+  #ifdef EPAPER
+  pinMode(BUTTON1PIN, INPUT_PULLUP);   // Taster gegen GND
+  pinMode(BUTTON2PIN, INPUT_PULLUP);
+  #else
   pinMode(BUTTON1PIN, INPUT);
   pinMode(BUTTON2PIN, INPUT);
+  #endif
 
   // Setup Display
   Serial.println("Setup Display...");
@@ -858,14 +1143,23 @@ void setup() {
   display.setTextFont(4);
 
   //Welcome Messager
+  #ifdef EPAPER
+  // e-Paper: schwarz auf Papierweiss (TFT_BLACK = Papier im Wrapper).
+  // Font 4 waere auf 200px zu breit, deshalb eine Stufe kleiner.
+  display.fillScreen(TFT_BLACK);
+  display.setTextColor(TFT_WHITE,TFT_BLACK);
+  display.setTextFont(2);
+  #else
   display.fillScreen(TFT_WHITE);
   display.setTextColor(TFT_BLACK,TFT_WHITE);
+  #endif
   display.setCursor(0,25);
   display.println(" BLE2MQTT starting");
   display.printf("  Version: %s", version);
   display.println();
   display.println();
   display.println(" ..Nihil fit sine causa..");
+  DISPLAY_FLUSH();
   delay(2000);
 
   display.fillScreen(TFT_BLACK);
@@ -896,7 +1190,24 @@ void setup() {
   WiFi.mode(WIFI_STA);   
 
   // Button2 Press on Startup Resets WiFi Settings and starts AP Mode
-  if ( digitalRead(BUTTON1PIN) == LOW ) {
+  Serial.printf("Button pins: BUTTON1PIN(%d)=%d BUTTON2PIN(%d)=%d\n",
+                BUTTON1PIN, digitalRead(BUTTON1PIN),
+                BUTTON2PIN, digitalRead(BUTTON2PIN));
+  bool resetWiFi = ( digitalRead(BUTTON1PIN) == LOW );
+  #ifdef EPAPER
+  // Button1 ist hier der PWR-Taster, mit dem auch eingeschaltet wird - beim
+  // Boot ist er also haeufig noch gedrueckt. Nur bewusstes Weiterhalten ueber
+  // das Zeitfenster hinaus loescht die WLAN-Daten.
+  if (resetWiFi) {
+    Serial.println("Button1 held - keep holding 3s to reset WiFi settings...");
+    display.println("Hold 3s to reset WiFi");
+    DISPLAY_FLUSH();
+    delay(3000);
+    resetWiFi = ( digitalRead(BUTTON1PIN) == LOW );
+    if (!resetWiFi) Serial.println("Button1 released - WiFi settings kept.");
+  }
+  #endif
+  if ( resetWiFi ) {
     Serial.println("Button1Pin is low - Reset WiFi Settings - Starting in AP Mode.");
     display.println("Reset WiFi Settings...");
     display.println("Starting AP Mode.");
@@ -925,6 +1236,7 @@ void setup() {
   #endif
 
   display.println("Searching Sensors");
+  DISPLAY_FLUSH();
 
   #ifdef MQTT
   /* Prepare MQTT client */
@@ -963,6 +1275,7 @@ void loop() {
   u_long startmillis = millis();
   while (millis() - startmillis < 60000 && millis() >= startmillis) {
     client.loop();
+    serviceDisplay();
   }
   pBLEScan->stop();
   Serial.println("Stop Scanning...");
