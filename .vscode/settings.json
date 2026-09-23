@@ -49,5 +49,6 @@
         "cinttypes": "cpp",
         "typeinfo": "cpp",
         "list": "cpp"
-    }
+    },
+    "cmake.sourceDirectory": "/home/zwp/Workspace/ESP32BLE2MQTT/lib/WiFiManager"
 }

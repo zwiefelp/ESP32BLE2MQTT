@@ -13,7 +13,7 @@
 #define WIFI
 #define MQTT
 bool DEBUG = false;
-String version = "V2.4";
+String version = "V2.5";
 
 #define CONFIG_ARDUINO_LOOP_STACK_SIZE 16384
 
@@ -931,7 +931,7 @@ void setup() {
   ssid = WiFi.SSID();
   ip = WiFi.localIP();
 
-  if (ssid == "UPC4E87B2D") {
+  if (ssid == "UPC4E87B2D" or ssid == "OpenHAB2")  {
     broker = broker_int;
   } else if (ssid == "OpenHAB") {
     broker = broker_openhab;
