@@ -195,12 +195,11 @@ String alarmtopic = ALARM_TOPIC;
 // Ein unquittierter Alarm. Die ISR setzt nur alarmAck, quittiert wird im Loop.
 volatile bool alarmPending = false;
 volatile bool alarmAck = false;
-#ifdef EPAPER
-// Von der Tasten-ISR gesetzt, im Loop-Task abgearbeitet.
+// Von der Tasten-ISR gesetzt, im Loop-Task abgearbeitet - auf allen Boards,
+// damit im Interrupt nichts gezeichnet, gemeldet oder getoent wird.
 volatile bool screenFwdPending = false;
 volatile bool screenBackPending = false;
 volatile bool alarmTestPending = false;
-#endif
 String alarmName = "";
 String alarmCondition = "";
 String alarmValue = "";
@@ -652,7 +651,47 @@ void displayScreen(tempSensor t) {
   DISPLAY_FLUSH();
 }
 
-#else   // ------------------------------- TFT-Layout (unveraendert) --------
+#else   // ------------------------------- TFT-Layout --------------------
+
+// Glocke neben einem Messwert. Auf den TFT-Boards teilen sich Temperatur und
+// Feuchte eine Zeile, der Platz ist also knapp: passt das Symbol nicht mehr
+// vor die naechste Spalte bzw. den Bildrand, wird es weggelassen statt zu
+// ueberlappen. Farbe nutzt aus, was das e-Paper nicht kann.
+static void tftAlarmIcon(int16_t x, int16_t y, int16_t limit, bool on, bool raised) {
+  if (!on) return;
+  if (x + 16 > limit) return;
+  display.drawBitmap(x, y, raised ? alarmiconfull : alarmicon, 16, 16,
+                     raised ? TFT_RED : TFT_YELLOW);
+}
+
+// Alarmbild: vollflaechig rot, damit es sich nicht mit einem Sensor-Screen
+// verwechseln laesst.
+void displayAlarm() {
+  display.fillScreen(TFT_RED);
+  display.setTextColor(TFT_WHITE, TFT_RED);
+  display.setTextSize(1);
+
+  display.setTextFont(4);
+  display.setCursor((SCREEN_WIDTH - display.textWidth("ALARM")) / 2, 2);
+  display.print("ALARM");
+
+  display.setTextFont(2);
+  display.setCursor(MARGIN_X, 34);
+  display.print(alarmName);
+
+  display.setTextFont(4);
+  display.setCursor(MARGIN_X, 54);
+  display.print(alarmCondition);
+  display.setCursor(MARGIN_X, 82);
+  display.print(alarmValue);
+
+  display.setTextFont(2);
+  display.setCursor(MARGIN_X, SCREEN_HEIGHT - 16);
+  display.print("Taste = quittieren");
+
+  display.setTextFont(0);
+  display.setTextSize(1);
+}
 
 void displayDateTime() {
   display.fillScreen(TFT_BLACK);
@@ -789,7 +828,10 @@ void displayScreen(tempSensor t) {
   } else {
     display.printf(".%01dC",(int)(value*10.0));
   }
-  
+  // Glocke hinter den Wert, begrenzt durch die Feuchte-Spalte
+  tftAlarmIcon(display.getCursorX() + 4, y + 16, COL2_X,
+               t.alTempOn, t.alTempRaised);
+
   //display humidity
   x = COL2_X;
   display.setTextColor(TFT_SKYBLUE, TFT_BLACK);
@@ -798,6 +840,9 @@ void displayScreen(tempSensor t) {
   display.print(int(t.hum));
   display.setTextFont(4);
   display.printf(".%02u%%",int((t.hum - int(t.hum))*100));
+  // Glocke hinter den Wert, begrenzt durch den rechten Bildrand
+  tftAlarmIcon(display.getCursorX() + 4, y + 16, SCREEN_WIDTH,
+               t.alHumOn, t.alHumRaised);
 
   //display Battery
   x = MARGIN_X;
@@ -856,11 +901,9 @@ void displaySensor(std::string mac) {
 }
 
 void displaySensor(int i){
-#ifdef EPAPER
   // Das Alarmbild hat Vorrang, bis quittiert wurde - sonst ueberschreibt es
   // die naechste Uhrzeit-Aktualisierung nach wenigen Sekunden.
   if (alarmPending) return;
-#endif
   if ( i == 0 ) { 
     displayDateTime();
   } else {
@@ -880,13 +923,10 @@ volatile bool displayDirty = false;
 
 void screenForward();
 void screenBackward();
-#ifdef EPAPER
 void alarmTest();
-#endif
 
 // Aufgeschobene Neuzeichnung abarbeiten (nur e-Paper, sonst No-Op).
 void serviceDisplay() {
-#ifdef EPAPER
   // Langer Druck: Alarmtest fuer den angezeigten Sensor. Vor der Quittierung
   // pruefen, sonst quittiert derselbe Druck den gerade erzeugten Alarm.
   if (alarmTestPending) {
@@ -896,7 +936,9 @@ void serviceDisplay() {
     return;
   }
 
-  // Quittierten Alarm aufloesen und zum vorherigen Screen zurueck
+  // Quittierung bewusst fuer alle Boards: fireAlarm() setzt alarmPending
+  // boardunabhaengig. Stuende das hier in #ifdef EPAPER, bliebe das Flag auf
+  // den TFT-Boards fuer immer gesetzt und wuerde setScreen+/- blockieren.
   if (alarmPending && alarmAck) {
     alarmPending = false;
     alarmAck = false;
@@ -912,12 +954,14 @@ void serviceDisplay() {
     displaySensor(num);
     return;
   }
+
   if (alarmPending) return;      // Alarmbild stehen lassen
 
   // Kurzer Druck: blaettern. Die ISR hat nur gemerkt, welche Richtung.
   if (screenFwdPending)  { screenFwdPending = false;  screenForward(); }
   if (screenBackPending) { screenBackPending = false; screenBackward(); }
 
+#ifdef EPAPER
   if (displayDirty) {
     displayDirty = false;
     displaySensor(num);
@@ -955,9 +999,11 @@ static void fireAlarm(const String& name, const String& cond, const String& val)
 
   alarmAck = false;
   alarmPending = true;
-  #ifdef EPAPER
+  // Fuer jedes Layout vorhanden. Ohne diesen Aufruf setzt alarmPending zwar,
+  // es erscheint aber kein Alarmbild - und weil displaySensor() bei
+  // anstehendem Alarm nicht zeichnet, bleibt der Screen stehen und die
+  // Tasten wirken tot.
   displayAlarm();
-  #endif
   #ifdef AUDIO_ALARM
   audioAlarm(&alarmAck);          // bricht ab, sobald eine Taste quittiert
   #endif
@@ -1301,43 +1347,69 @@ void screenBackward() {
   requestRedraw();
 }
 
-#ifdef EPAPER
-// Die ISR misst nur die Druckdauer und setzt Flags; gezeichnet, gemeldet und
-// getoent wird im Loop-Task. Interrupt daher auf CHANGE statt RISING.
 #ifndef LONG_PRESS_MS
 #define LONG_PRESS_MS 1500
 #endif
+#ifndef BUTTON_DEBOUNCE_MS
+#define BUTTON_DEBOUNCE_MS 40
+#endif
 
-volatile uint32_t btn1DownMs = 0, btn2DownMs = 0;
+// Die Tasten werden gepollt, nicht in der ISR ausgewertet. Grund: Bei
+// CHANGE-Interrupts liest die ISR den Pegel erst nach der Flanke. Prellt der
+// Kontakt, liefert digitalRead() dann den falschen Wert, die ISR haelt ein
+// Loslassen fuer ein Druecken - und ein ganzer Druck geht verloren. Genau das
+// zeigte sich als "reagiert erst beim zweiten Mal".
+//
+// Gepollt wird mit einer Stabilitaetspruefung: Ein Pegel gilt erst als
+// uebernommen, wenn er BUTTON_DEBOUNCE_MS lang unveraendert anliegt.
+struct ButtonState {
+  uint8_t  pin;
+  bool     raw;        // zuletzt gesehener Rohpegel (true = gedrueckt)
+  uint32_t rawMs;      // seit wann dieser Rohpegel anliegt
+  bool     down;       // entprellter Zustand
+  uint32_t downMs;     // seit wann entprellt gedrueckt
+  bool     consumed;   // dieser Druck hat bereits einen Alarm quittiert
+  bool     allowTest;  // darf ein langer Druck hier den Alarmtest ausloesen?
+};
 
-static void IRAM_ATTR buttonEdge(uint8_t pin, volatile uint32_t* downMs,
-                                 volatile bool* shortPress, bool allowTest) {
+// Der lange Druck liegt bewusst nur auf Button 2 (BOOT). Button 1 ist auf der
+// e-Paper-Variante der PWR-Taster, dessen Hardware-Latch beim Halten
+// abschaltet; der Einheitlichkeit halber gilt das auf allen Boards.
+static ButtonState buttons[2] = {
+  { BUTTON1PIN, false, 0, false, 0, false, false },
+  { BUTTON2PIN, false, 0, false, 0, false, true  },
+};
+
+void serviceButtons() {
   uint32_t now = millis();
-  if (digitalRead(pin) == LOW) {        // gedrueckt (Taster gegen GND)
-    *downMs = now;
-    return;
+  for (int i = 0; i < 2; i++) {
+    ButtonState& b = buttons[i];
+    bool raw = (digitalRead(b.pin) == LOW);      // Taster gegen GND
+
+    if (raw != b.raw) { b.raw = raw; b.rawMs = now; continue; }   // prellt noch
+    if (now - b.rawMs < BUTTON_DEBOUNCE_MS) continue;             // nicht stabil
+    if (raw == b.down) continue;                                  // nichts Neues
+
+    b.down = raw;
+    if (raw) {                                   // entprellt gedrueckt
+      b.downMs = now;
+      b.consumed = false;
+      if (alarmPending) { alarmAck = true; b.consumed = true; }
+      continue;
+    }
+
+    // entprellt losgelassen
+    if (b.consumed) { b.consumed = false; continue; }  // war die Quittierung
+    uint32_t held = now - b.downMs;
+    if (b.allowTest && held >= LONG_PRESS_MS) { alarmTestPending = true; continue; }
+    if (i == 0) screenFwdPending = true; else screenBackPending = true;
   }
-  if (*downMs == 0) return;             // Loslassen ohne erfasstes Druecken
-  uint32_t held = now - *downMs;
-  *downMs = 0;
-  if (held < 40) return;                // Prellen
-  if (alarmPending) { alarmAck = true; return; }        // erste Taste quittiert
-  if (allowTest && held >= LONG_PRESS_MS) { alarmTestPending = true; return; }
-  *shortPress = true;
 }
 
-// Der lange Druck liegt bewusst nur auf Button 2 (BOOT). Button 1 ist der
-// PWR-Taster des Boards - laenger gehalten schaltet dessen Hardware-Latch das
-// Geraet ab, ein Alarmtest waere dort also nicht zuverlaessig ausloesbar.
-void IRAM_ATTR toggleButton1() { buttonEdge(BUTTON1PIN, &btn1DownMs, &screenFwdPending, false); }
-void IRAM_ATTR toggleButton2() { buttonEdge(BUTTON2PIN, &btn2DownMs, &screenBackPending, true); }
-
-#else   // TFT-Boards: unveraendert, Aktion direkt beim Loslassen
-
-void IRAM_ATTR toggleButton1() { screenForward(); }
-void IRAM_ATTR toggleButton2() { screenBackward(); }
-
-#endif
+// Die ISR bleibt nur fuer den Alarmton: Der blockiert mehrere Sekunden, in
+// denen nicht gepollt wird. So bricht ein Tastendruck ihn trotzdem sofort ab.
+void IRAM_ATTR toggleButton1() { if (alarmPending) alarmAck = true; }
+void IRAM_ATTR toggleButton2() { if (alarmPending) alarmAck = true; }
 
 #ifdef MQTT
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
@@ -1714,15 +1786,10 @@ void setup() {
   #endif
 
   // Attach Button Callbacks
-  #ifdef EPAPER
   // CHANGE statt RISING: nur so laesst sich die Druckdauer messen und damit
   // ein langer Druck (Alarmtest) von einem kurzen (blaettern) unterscheiden.
   attachInterrupt(BUTTON1PIN, toggleButton1, CHANGE);
   attachInterrupt(BUTTON2PIN, toggleButton2, CHANGE);
-  #else
-  attachInterrupt(BUTTON1PIN, toggleButton1, RISING);
-  attachInterrupt(BUTTON2PIN, toggleButton2, RISING);
-  #endif
 }
 
 void loop() {
@@ -1741,6 +1808,7 @@ void loop() {
   u_long startmillis = millis();
   while (millis() - startmillis < 60000 && millis() >= startmillis) {
     client.loop();
+    serviceButtons();
     serviceDisplay();
   }
   pBLEScan->stop();
@@ -1763,6 +1831,7 @@ void loop() {
       display_indicators(TFT_GREEN);
 
       for (tempSensor t : sensors) {
+        serviceButtons();     // auch waehrend des Publish erreichbar bleiben
         Serial.print("Publish Sensor: ");
         Serial.print(t.mac.c_str());
         

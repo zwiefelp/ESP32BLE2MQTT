@@ -187,6 +187,7 @@ GPIO 17 = VBAT-Freigabe (aktiv HIGH, für Akkubetrieb), GPIO 42 = Audio-Freigabe
 | `AUDIO_VOLUME` | ES8311-Register 0x32, dB = −95,5 + 0,5 × Wert |
 | `ALARM_TOPIC` | Standard-Topic, per Config-Zeile `alarmtopic:` überschreibbar |
 | `LONG_PRESS_MS` | Schwelle für den langen Druck (Standard 1500 ms) |
+| `BUTTON_DEBOUNCE_MS` | Entprellzeit der Taster (Standard 40 ms) |
 
 > **I²C-Bus beim Start.** Bleiben `AUDIO_PWR_PIN` und `AUDIO_PA_PIN` offen, kann
 > der gemeinsame Bus in einen Zustand geraten, in dem SDA dauerhaft LOW bleibt
@@ -215,13 +216,22 @@ pio device monitor -e lilygo-t-display-s3
 | Button | T-Display-S3 | TTGO T-Display | e-Paper-S3 | Funktion |
 |---|---|---|---|---|
 | Button 1 | GPIO 14 | GPIO 35 | GPIO 18 (PWR) | Screen vorwärts; **beim Boot gedrückt halten → WLAN-Einstellungen zurücksetzen** |
-| Button 2 | GPIO 0 | GPIO 0 | GPIO 0 (BOOT) | Screen rückwärts; **lang drücken → Alarmtest** (nur e-Paper) |
+| Button 2 | GPIO 0 | GPIO 0 | GPIO 0 (BOOT) | Screen rückwärts; **lang drücken → Alarmtest** |
 
-Bei der e-Paper-Variante hängen die Interrupts auf `CHANGE` statt `RISING` –
-nur so lässt sich die Druckdauer messen und ein langer Druck von einem kurzen
-unterscheiden. Die ISR misst ausschließlich und setzt Flags; geblättert,
-gemeldet und getönt wird im Loop-Task. Steht ein Alarm an, quittiert jeder
-Tastendruck, ohne den Screen zu wechseln.
+Die Tasten werden **gepollt, nicht in der ISR ausgewertet**. Bei
+`CHANGE`-Interrupts liest die ISR den Pegel erst *nach* der Flanke; prellt der
+Kontakt, liefert `digitalRead()` dann den falschen Wert, und ein ganzer Druck
+geht verloren – spürbar als „reagiert erst beim zweiten Mal". Stattdessen gilt
+ein Pegel erst als übernommen, wenn er `BUTTON_DEBOUNCE_MS` (40 ms) stabil
+anliegt. Gepollt wird in der Scanschleife und während des MQTT-Publish, also
+praktisch durchgehend.
+
+Die ISR bleibt für genau einen Fall: Der Alarmton blockiert mehrere Sekunden,
+in denen nicht gepollt wird. Sie setzt dort nur `alarmAck`, damit ein
+Tastendruck den Ton sofort abbricht.
+
+Steht ein Alarm an, quittiert jeder Tastendruck, ohne den Screen zu wechseln –
+der quittierende Druck blättert beim Loslassen also nicht zusätzlich weiter.
 
 Bei der e-Paper-Variante sind das die beiden Taster des Boards, beide aktiv LOW
 mit internem Pullup. Die Pegel werden beim Start auf der seriellen Konsole
@@ -307,11 +317,36 @@ gerade angezeigten Sensor aus. Er nimmt denselben Weg wie ein echter Alarm –
 inklusive MQTT-Publish –, sodass sich die Kette bis zur Benachrichtigung prüfen
 lässt. Gemeldet wird `<fullname>: Alarmtest = <temp> C / <hum> %`.
 
-> Der lange Druck liegt bewusst **nicht** auf Button 1: Das ist der PWR-Taster
-> des Boards, dessen Hardware-Latch beim Halten abschaltet.
+> Der lange Druck liegt bewusst **nicht** auf Button 1: Auf der e-Paper-Variante
+> ist das der PWR-Taster, dessen Hardware-Latch beim Halten abschaltet. Der
+> Einheitlichkeit halber gilt das auf allen Boards.
 
 Auf Screen 0 (Datum/Uhrzeit) passiert nichts, dort ist kein Sensor. Die Dauer
 ist über `LONG_PRESS_MS` einstellbar.
+
+#### Was auf welchem Board läuft
+
+Die Alarmfunktion läuft auf **allen drei Targets**. Einziger Unterschied ist
+der Ton, für den es auf den TFT-Boards keine Hardware gibt:
+
+| | TTGO T-Display / T-Display-S3 | e-Paper 1.54 |
+|---|---|---|
+| Regel per `alarm:`-Zeile | ✅ | ✅ |
+| Alarm auf MQTT | ✅ | ✅ |
+| Quittieren (Taste oder `setScreen±`) | ✅ | ✅ |
+| Glocke am Sensor-Screen | ✅ gelb / rot | ✅ Umriss / gefüllt |
+| Alarmbild | ✅ vollflächig rot | ✅ invertierter Kopf |
+| Alarmtest per langem Druck | ✅ | ✅ |
+| Alarmton | ❌ keine Audio-Hardware | ✅ |
+
+Die Darstellung nutzt jeweils die Stärke des Displays: Auf dem TFT zeigt die
+**Farbe** den Zustand (gelb = Regel scharf, rot = verletzt), auf dem
+monochromen e-Paper die **Füllung** (Umriss = scharf, ausgefüllt = verletzt).
+
+Auf den TFT-Boards teilen sich Temperatur und Feuchte eine Zeile, der Platz ist
+dort knapp. Passt die Glocke nicht mehr vor die nächste Spalte bzw. den
+Bildrand, wird sie **weggelassen statt zu überlappen** – bei sehr breiten
+Werten kann sie also fehlen.
 
 Auf der e-Paper-Variante zusätzlich:
 
