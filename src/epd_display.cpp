@@ -65,6 +65,14 @@ void EpdDisplay::drawFastHLine(int16_t x, int16_t y, int16_t w, uint16_t color) 
   _mix(_map(color));
 }
 
+void EpdDisplay::fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) {
+  _epd.fillRect(x, y, w, h, _map(color));
+  _mix(0x52454354u);
+  _mix(((uint32_t)(uint16_t)x << 16) | (uint16_t)y);
+  _mix(((uint32_t)(uint16_t)w << 16) | (uint16_t)h);
+  _mix(_map(color));
+}
+
 void EpdDisplay::setTextColor(uint16_t fg) {
   _ink = _map(fg);
   _paper = _ink;               // wie TFT_eSPI: einarmig = transparenter Hintergrund

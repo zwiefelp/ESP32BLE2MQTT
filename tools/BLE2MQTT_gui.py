@@ -45,7 +45,7 @@ def updatewidget(dev,field):
     sensorwidget[key].config(text = sensor[dev][field])
     
 def reconfigureLayout(dev):
-    if sensor[dev]['type'] in "ThermoBeacon,Govee H5075":
+    if sensor[dev]['type'] in "ThermoBeacon,Govee H5075,SHT3":
         sensor[dev]["layouttype"] = "thermo"
         debugprint("Reconfigure " + sensor[dev]['type'] + " => Thermo")
         valueframe = tk.Frame(sensorframe[dev], padx=2, pady=2)

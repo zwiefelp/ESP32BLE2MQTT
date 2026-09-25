@@ -4,7 +4,7 @@ BLE-zu-MQTT-Bridge für ESP32 mit TFT- oder e-Paper-Display. Das Gerät scannt p
 Low Energy nach Sensoren, zeigt deren Werte auf dem Display an und publiziert
 sie an einen MQTT-Broker (Anbindung an openHAB).
 
-Aktuelle Version: **V2.5**
+Aktuelle Version: **V3.0**
 
 ## Funktionen
 
@@ -14,6 +14,8 @@ Aktuelle Version: **V2.5**
   - Datum/Uhrzeit-Übersicht (Screen 0)
   - je ein Detail-Screen pro Sensor
 - **MQTT-Publish** der Messwerte unter `/openhab/in/<device>/...`.
+- **Alarme** pro Sensor auf Temperatur oder Feuchte, per MQTT konfigurierbar;
+  auf der e-Paper-Variante mit Ton und Alarmbild, quittierbar per Tastendruck.
 - **Fernsteuerung** per MQTT-Kommandos (Neustart, Screen wechseln, Display
   aus, Debug, …).
 - **WiFi-Einrichtung** über einen WiFiManager-Konfig-Accesspoint (kein
@@ -26,6 +28,20 @@ Aktuelle Version: **V2.5**
 | ThermoBeacon | Gerätename `ThermoBeacon` | Temp, Feuchte, Batterie (V) |
 | Govee H5075 | MAC-Prefix `a4:c1:38` | Temp, Feuchte, Batterie (%) |
 | Victron SmartSolar | MAC-Prefix `60:a4:23` | begonnen, noch unvollständig |
+| **SHT3** (intern) | fest verbaut, kein BLE | Temp, Feuchte, Systemspannung, WLAN-RSSI |
+
+Der interne Sensor der e-Paper-Variante wird wie ein BLE-Sensor behandelt:
+gleiche Struktur, gleicher Screen, gleiche MQTT-Topics. MAC und `device` werden
+aus der ESP-ID gebildet, `name` ist `SHT3`, `fullname` `BLE2MQTT Intern`. Ein
+`getconfig` löst er nicht aus – sein Name steht fest. Die sonst leeren Felder
+sind sinnvoll belegt: **RSSI** ist die WLAN-Feldstärke des Gateways selbst,
+**Batterie** die Systemspannung (ADC1_CH3 an GPIO 4, 1:2-Teiler).
+
+> **Eigenerwärmung beachten.** Der SHTC3 sitzt neben dem ESP32 auf derselben
+> Platine. Bei aktivem WLAN und BLE wurden **33–34 °C** gemessen, während der
+> Raum deutlich kühler war. Der Wert taugt als Geräte-, nicht als
+> Raumtemperatur. `SHTC3_TEMP_OFFSET` korrigiert ihn; der Default ist bewusst
+> `0`, damit die Messung nicht still geschönt wird.
 
 ## Hardware / Build-Targets
 
@@ -160,6 +176,23 @@ GPIO 17 = VBAT-Freigabe (aktiv HIGH, für Akkubetrieb), GPIO 42 = Audio-Freigabe
 | `EPD_SPI_HZ` | SPI-Takt (Standard 4 MHz) |
 | `EPD_DIAG_BAUD` | ≠0 schaltet die GxEPD2-Diagnose auf Serial frei: Refresh-Dauern in µs und `Busy Timeout!`. Plausibel sind ~1.380.000 µs voll und ~362.000 µs partiell – einstellige Werte heißen, dass das Panel nicht erreicht wird |
 | `EPD_PANEL_GDEY0154D67` | Fallback auf die neuere Panel-Revision, falls das Bild stark geistert |
+| `INTERNAL_SHTC3` | schaltet den verbauten SHTC3 als zusätzlichen Sensor frei |
+| `SHTC3_SDA` / `SHTC3_SCL` | I²C-Pins (47 / 48), Bus geteilt mit RTC `0x51` und Codec `0x18` |
+| `SHTC3_TEMP_OFFSET` | Korrektur in Kelvin gegen Eigenerwärmung, Default `0.0f` |
+| `INTERNAL_VBAT_ADC` | ADC-Pin der Systemspannung (GPIO 4) |
+| `BOARD_PWR_PIN` / `BOARD_PWR_ON_LEVEL` | Versorgungsschiene der Peripherie (GPIO 17, aktiv HIGH) |
+| `AUDIO_PWR_PIN` / `AUDIO_PA_PIN` | Audio-Rail und Endstufe, beim Start definiert gesetzt |
+| `AUDIO_ALARM` | schaltet Alarm- und Startton über ES8311 + NS4150 frei |
+| `AUDIO_ALARM_REPEATS` | Anzahl der Doppeltöne je Alarm (Standard 10) |
+| `AUDIO_VOLUME` | ES8311-Register 0x32, dB = −95,5 + 0,5 × Wert |
+| `ALARM_TOPIC` | Standard-Topic, per Config-Zeile `alarmtopic:` überschreibbar |
+
+> **I²C-Bus beim Start.** Bleiben `AUDIO_PWR_PIN` und `AUDIO_PA_PIN` offen, kann
+> der gemeinsame Bus in einen Zustand geraten, in dem SDA dauerhaft LOW bleibt
+> und kein Gerät mehr antwortet. Deshalb werden beide beim Start definiert
+> gesetzt – der Hersteller macht das ebenso. Zusätzlich löst der Treiber einen
+> hängenden Bus per Taktflanken und setzt `Wire.setTimeOut()`, damit ein toter
+> Bus die Firmware nicht blockiert.
 
 ## Bauen & Flashen
 
@@ -216,6 +249,59 @@ Pro Sensor unter `/openhab/in/<device>/`:
 `*_temp/state`, `*_hum/state`, `*_bat/state`, `*_battype/state`,
 `*_type/state`, `*_rssi/state`, `*_name/state`, `*_fullname/state`,
 `*_gateway/state`, `*_lastupdate/state`
+
+### Alarme
+
+Alarme werden über dieselbe `getconfig`-Antwort konfiguriert wie die
+Sensornamen – eine Zeile je Regel:
+
+```
+name:910f00000121:Kuehlschrank
+alarm:910f00000121:temp:gt:10
+```
+
+| Feld | Werte |
+|---|---|
+| Größe | `temp` oder `hum` |
+| Operator | `gt` (größer) oder `lt` (kleiner) |
+| Grenzwert | Zahl, z. B. `10` oder `-5.5` |
+
+Je Sensor ist eine Regel für Temperatur **und** eine für Feuchte möglich. Die
+Auswertung läuft einmal pro Messzyklus, nach dem MQTT-Publish.
+
+**Eine Regel löst nur einmal aus.** Scharf wird sie erst wieder, wenn der Wert
+in den gültigen Bereich zurückkehrt – sonst würde sie im Minutentakt weiter
+alarmieren. Das Anwenden ist idempotent: Die Config trifft nach jedem
+`getconfig` erneut ein, eine unveränderte Regel lässt einen laufenden Alarm
+deshalb in Ruhe.
+
+Das Ziel-Topic ist über eine Config-Zeile änderbar, Standard `/openhab/alarm`:
+
+```
+alarmtopic:/openhab/meinalarm
+```
+
+Veröffentlicht wird `<fullname>: <größe> <operator> <grenzwert> = <istwert>`,
+also z. B. `Kuehlschrank: temp gt 10.0 = 12.34`. Beim Quittieren geht
+**`alarm bestätigt`** auf dasselbe Topic. Beide Meldungen sind `retained`: Ein
+neu hinzukommender Abonnent sieht dadurch den aktuellen Zustand und nicht einen
+längst erledigten Alarm als vermeintlich offenen.
+
+Auf dem Sensor-Screen markiert eine **Glocke** den Wert, für den eine Regel
+konfiguriert ist – hinter der linksbündigen Temperatur, vor der rechtsbündigen
+Feuchte.
+
+Auf der e-Paper-Variante zusätzlich:
+
+- **Alarmton**, standardmäßig 10 Doppeltöne (`AUDIO_ALARM_REPEATS`)
+- **Alarmbild** mit invertiertem Kopf, damit es sich von den Sensor-Screens
+  unterscheidet; es bleibt stehen und wird von Uhrzeit-Updates nicht
+  überschrieben
+- **Quittieren mit einer beliebigen Taste** – der erste Druck bestätigt und
+  bricht den laufenden Ton sofort ab, ohne den Screen zu wechseln. Die
+  MQTT-Kommandos `setScreen+` / `setScreen-` quittieren ebenfalls, da sie
+  denselben Pfad nutzen.
+- **Startton** beim Hochfahren
 
 ### Kommandos
 

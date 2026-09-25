@@ -134,6 +134,18 @@ print("  hum     y=108..%3d  x=%3d..%3d  '100' + '.00 %%' (rechtsbuendig)"
       % (h_bot, W - M - hw, W - M))
 if W - M - hw < M:
     problem("ZU BREIT")
+# Alarm-Glocke: Temperatur linksbuendig -> Symbol dahinter,
+# Feuchte rechtsbuendig -> Symbol davor (16 px breit, 6 px Abstand)
+ICON, GAP = 16, 6
+tix = M + tw + GAP
+print("  glocke  y= 63.. 79  x=%3d..%3d  (hinter der Temperatur)" % (tix, tix + ICON))
+if tix + ICON > W:
+    problem("GLOCKE ZU WEIT RECHTS (%d px ueber)" % (tix + ICON - W))
+hix = (W - M - hw) - GAP - ICON
+print("  glocke  y=117..133  x=%3d..%3d  (vor der Feuchte)" % (hix, hix + ICON))
+if hix < M:
+    problem("GLOCKE RAGT LINKS HERAUS")
+
 gap("temp/hum", t_bot, 108)
 
 # Batterie und RSSI teilen sich eine Zeile: links bzw. rechts buendig

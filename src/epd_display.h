@@ -108,6 +108,7 @@ class EpdDisplay : public Print {
   void drawBitmap(int16_t x, int16_t y, const uint8_t* bitmap,
                   int16_t w, int16_t h, uint16_t color);
   void drawFastHLine(int16_t x, int16_t y, int16_t w, uint16_t color);
+  void fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color);
 
   void setTextColor(uint16_t fg);
   void setTextColor(uint16_t fg, uint16_t bg);

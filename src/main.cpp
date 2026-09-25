@@ -6,6 +6,15 @@
 #else
 #include <TFT_eSPI.h>
 #endif
+#ifdef AUDIO_ALARM
+#include "audio.h"
+#endif
+#ifdef INTERNAL_SHTC3
+#include "shtc3.h"
+#if !defined(EPAPER)
+#error "INTERNAL_SHTC3 ist bislang nur fuer die e-Paper-Variante umgesetzt (Layout fehlt)."
+#endif
+#endif
 #include <WiFiManager.h>
 #include <aes/esp_aes.h>
 #include <array>
@@ -17,7 +26,7 @@
 #define WIFI
 #define MQTT
 bool DEBUG = false;
-String version = "V2.5";
+String version = "V3.0";
 
 #define CONFIG_ARDUINO_LOOP_STACK_SIZE 16384
 
@@ -65,6 +74,8 @@ String version = "V2.5";
 #define EPD_DOT_STEP 14 // Abstand der Screen-Punkte in der Kopfzeile
 #define EPD_Y_RULE   20 // Trennlinie unter der Kopfzeile
 #define EPD_Y_FOOT  178 // Trennlinie ueber der Fusszeile
+#define EPD_ICON_GAP  6 // Abstand zwischen Messwert und Alarm-Glocke
+#define EPD_ICON_DY   9 // Glocke mittig zur Zeile der grossen Ziffern
 #elif defined(S3)
 #define SCREEN_WIDTH  320
 #define SCREEN_HEIGHT 170
@@ -111,6 +122,27 @@ const unsigned char wifiicon[] PROGMEM  = {
 	0b00000000, 0b00000000, //                 
 };
 
+// Glocke: markiert am Sensor-Screen den Wert, fuer den eine Alarmregel
+// konfiguriert ist. Format wie wifiicon (1 bpp, MSB links).
+const unsigned char alarmicon[] PROGMEM = {
+	0b00000001, 0b10000000, //        ##       
+	0b00000010, 0b01000000, //       #  #      
+	0b00000100, 0b00100000, //      #    #     
+	0b00001000, 0b00010000, //     #      #    
+	0b00001000, 0b00010000, //     #      #    
+	0b00010000, 0b00001000, //    #        #   
+	0b00010000, 0b00001000, //    #        #   
+	0b00100000, 0b00000100, //   #          #  
+	0b00100000, 0b00000100, //   #          #  
+	0b01000000, 0b00000010, //  #            # 
+	0b01000000, 0b00000010, //  #            # 
+	0b11111111, 0b11111111, // ################
+	0b00000000, 0b00000000, //                 
+	0b00000011, 0b11000000, //       ####      
+	0b00000001, 0b10000000, //        ##       
+	0b00000000, 0b00000000, //                 
+};
+
 #ifdef MQTT
 String basetopic = "/openhab/in/";
 String conftopic = "/openhab/configuration/";
@@ -134,6 +166,18 @@ PubSubClient client(wificlient);
 String mqttdate = "Mo,00.00.0000";
 String mqtttime = "00:00";
 
+#ifndef ALARM_TOPIC
+#define ALARM_TOPIC "/openhab/alarm"
+#endif
+// Per Config-Zeile "alarmtopic:<topic>" ueberschreibbar.
+String alarmtopic = ALARM_TOPIC;
+// Ein unquittierter Alarm. Die ISR setzt nur alarmAck, quittiert wird im Loop.
+volatile bool alarmPending = false;
+volatile bool alarmAck = false;
+String alarmName = "";
+String alarmCondition = "";
+String alarmValue = "";
+
 int MQ_COLOR = TFT_WHITE;
 
 u_int64_t espID = 0;
@@ -149,6 +193,13 @@ bool displayON = true;
 
 //Declare BLEScanner
 BLEScan* pBLEScan;
+
+#ifdef INTERNAL_SHTC3
+Shtc3 internalSensor;
+bool internalSensorFound = false;
+String internalMac = "";      // wie eine BLE-MAC aufgebaut, aus der ESP-ID
+int internalNum = 0;          // Platz in der Sensorliste
+#endif
 
 int num = 0;
 
@@ -169,6 +220,15 @@ struct tempSensor {
   int rssi = 0;
   int battype = 0; // 0=Volts, 1=Percent
   String lastupdate = "";
+
+  // Alarmregeln aus der MQTT-Config: alarm:<device>:<temp|hum>:<gt|lt>:<wert>
+  // Je Sensor ist eine Regel fuer Temperatur und eine fuer Feuchte moeglich.
+  // "raised" merkt sich, dass bereits ausgeloest wurde - scharf wird die Regel
+  // erst wieder, wenn der Wert in den gueltigen Bereich zurueckkehrt.
+  bool   alTempOn = false;  bool alTempGt = true;  double alTempLimit = 0.0;
+  bool   alHumOn  = false;  bool alHumGt  = true;  double alHumLimit  = 0.0;
+  bool   alTempRaised = false;
+  bool   alHumRaised  = false;
 };
 
 std::list<tempSensor> sensors;
@@ -259,6 +319,38 @@ void setSensor(std::string mac, String type, double temp, double hum, double bat
   }
 }
 
+// alarm:<device>:<temp|hum>:<gt|lt>:<wert>
+// Die Config trifft nach jedem getconfig erneut ein, das Setzen muss also
+// idempotent sein: eine unveraenderte Regel laesst "raised" in Ruhe, sonst
+// wuerde ein laufender Alarm bei jeder Neukonfiguration erneut ausloesen.
+void setSensorAlarm(String device, String field, String op, double limit) {
+  bool gt = (op == "gt");
+  if (!gt && op != "lt") {
+    Serial.printf("Alarm config: unbekannter Operator '%s'\n", op.c_str());
+    return;
+  }
+  for (auto it = sensors.rbegin(); it != sensors.rend(); it++) {
+    if (it->device != device) continue;
+
+    if (field == "temp") {
+      bool same = it->alTempOn && it->alTempGt == gt && it->alTempLimit == limit;
+      it->alTempOn = true; it->alTempGt = gt; it->alTempLimit = limit;
+      if (!same) it->alTempRaised = false;
+    } else if (field == "hum") {
+      bool same = it->alHumOn && it->alHumGt == gt && it->alHumLimit == limit;
+      it->alHumOn = true; it->alHumGt = gt; it->alHumLimit = limit;
+      if (!same) it->alHumRaised = false;
+    } else {
+      Serial.printf("Alarm config: unbekanntes Feld '%s'\n", field.c_str());
+      return;
+    }
+    Serial.printf("Alarm config: %s %s %s %.2f\n",
+                  device.c_str(), field.c_str(), op.c_str(), limit);
+    return;
+  }
+  // Sensor noch nicht entdeckt - die Config kommt beim naechsten getconfig erneut.
+}
+
 void setSensorName(String device, String fullname) {
   for (auto it = sensors.rbegin(); it != sensors.rend(); it++) {
     if (it->device == device) {
@@ -269,6 +361,10 @@ void setSensorName(String device, String fullname) {
 }
 
 void displaySensor(int i);
+
+// Hoechster gueltiger Screen-Index: 0 ist Datum/Uhrzeit, 1..n die Sensoren.
+// Der interne Sensor steht als regulaerer Eintrag mit in der Liste.
+static int maxScreen() { return (int)sensors.size(); }
 
 void display_indicators() {
   //display WiFI & MQTT Connection
@@ -325,7 +421,7 @@ static void epdHeader(int active) {
   display.setTextColor(TFT_WHITE, TFT_BLACK);
   display.setTextFont(0);
   display.setTextSize(2);
-  for (int i = 0; i <= (int)sensors.size(); i++) {
+  for (int i = 0; i <= maxScreen(); i++) {
     int16_t x = MARGIN_X + i * EPD_DOT_STEP;
     if (x + EPD_DOT_STEP > IND_ICON_X) break;   // nicht in die Indikatoren laufen
     display.setCursor(x, 2);
@@ -367,6 +463,41 @@ static void epdFooter(const String& text) {
   display.setTextSize(1);
   display.setCursor(MARGIN_X, EPD_Y_FOOT + 6);
   display.print(epdFit(text, SCREEN_WIDTH - 2 * MARGIN_X));
+}
+
+// Alarmbild: bewusst anders aufgebaut als die Sensor-Screens, damit es sich
+// auf einen Blick unterscheidet - invertierter Kopf statt Punktleiste.
+void displayAlarm() {
+  display.fillScreen(TFT_BLACK);
+
+  const int16_t maxW = SCREEN_WIDTH - 2 * MARGIN_X;
+
+  // Invertierter Balken: Flaeche mit Tinte fuellen, Text in Papierfarbe
+  display.fillRect(0, 0, SCREEN_WIDTH, 34, TFT_WHITE);
+  display.setTextColor(TFT_BLACK, TFT_WHITE);
+  display.setTextFont(4);
+  display.setCursor((SCREEN_WIDTH - display.textWidth("ALARM")) / 2, 6);
+  display.print("ALARM");
+
+  display.setTextColor(TFT_WHITE, TFT_BLACK);
+  display.setTextFont(2);
+  display.setCursor(MARGIN_X, 46);
+  display.print(epdFit(alarmName, maxW));
+
+  display.setTextFont(4);
+  display.setCursor(MARGIN_X, 74);
+  display.print(epdFit(alarmCondition, maxW));
+
+  display.setTextFont(6);
+  display.setCursor(MARGIN_X, 108);
+  display.print(epdFit(alarmValue, maxW));
+
+  display.drawFastHLine(0, EPD_Y_FOOT, SCREEN_WIDTH, TFT_WHITE);
+  display.setTextFont(2);
+  display.setCursor(MARGIN_X, EPD_Y_FOOT + 4);
+  display.print("Taste = quittieren");
+
+  DISPLAY_FLUSH();
 }
 
 void displayDateTime() {
@@ -447,13 +578,27 @@ void displayScreen(tempSensor t) {
   } else {
     snprintf(small, sizeof(small), ".%01d C", (int)(frac * 10.0));
   }
+  // Breite vor dem Zeichnen bestimmen, damit die Glocke daneben passt.
+  int16_t tw = epdValueWidth(big, small);
   epdValue(MARGIN_X, 54, big, small);
+  if (t.alTempOn) {
+    // Temperatur steht linksbuendig -> Symbol dahinter
+    display.drawBitmap(MARGIN_X + tw + EPD_ICON_GAP, 54 + EPD_ICON_DY,
+                       alarmicon, 16, 16, TFT_WHITE);
+  }
 
   // Luftfeuchte - rechtsbuendig und tiefer, also diagonal zur Temperatur.
   // Der Platz dafuer kommt aus der zusammengelegten Bat/RSSI-Zeile.
   snprintf(big, sizeof(big), "%d", (int)t.hum);
   snprintf(small, sizeof(small), ".%02u %%", (unsigned)((t.hum - int(t.hum)) * 100));
-  epdValue(SCREEN_WIDTH - MARGIN_X - epdValueWidth(big, small), 108, big, small);
+  int16_t hw = epdValueWidth(big, small);
+  int16_t hx = SCREEN_WIDTH - MARGIN_X - hw;
+  epdValue(hx, 108, big, small);
+  if (t.alHumOn) {
+    // Feuchte steht rechtsbuendig -> Symbol davor
+    display.drawBitmap(hx - EPD_ICON_GAP - 16, 108 + EPD_ICON_DY,
+                       alarmicon, 16, 16, TFT_WHITE);
+  }
 
   // Batterie und Empfangsstaerke teilen sich eine Zeile: links bzw. rechts
   // buendig, damit sie bei langen Werten nicht kollidieren.
@@ -681,6 +826,11 @@ void displaySensor(std::string mac) {
 }
 
 void displaySensor(int i){
+#ifdef EPAPER
+  // Das Alarmbild hat Vorrang, bis quittiert wurde - sonst ueberschreibt es
+  // die naechste Uhrzeit-Aktualisierung nach wenigen Sekunden.
+  if (alarmPending) return;
+#endif
   if ( i == 0 ) { 
     displayDateTime();
   } else {
@@ -701,6 +851,23 @@ volatile bool displayDirty = false;
 // Aufgeschobene Neuzeichnung abarbeiten (nur e-Paper, sonst No-Op).
 void serviceDisplay() {
 #ifdef EPAPER
+  // Quittierten Alarm aufloesen und zum vorherigen Screen zurueck
+  if (alarmPending && alarmAck) {
+    alarmPending = false;
+    alarmAck = false;
+    Serial.println("Alarm quittiert.");
+    #ifdef MQTT
+    // Ueberschreibt die retained Alarmmeldung: ein neu hinzukommender
+    // Abonnent sieht dadurch den quittierten Zustand statt eines alten
+    // Alarms, der laengst erledigt ist.
+    if (client.connected()) {
+      client.publish(alarmtopic.c_str(), "alarm bestätigt", true);
+    }
+    #endif
+    displaySensor(num);
+    return;
+  }
+  if (alarmPending) return;      // Alarmbild stehen lassen
   if (displayDirty) {
     displayDirty = false;
     displaySensor(num);
@@ -717,6 +884,114 @@ static void requestSensorScreen(const tempSensor& t) {
   displaySensor(t.num);
 #endif
 }
+
+// Einen Alarm ausloesen: melden, anzeigen, Ton. Laeuft ausschliesslich im
+// Loop-Task - Publish und Tonausgabe duerfen weder in der ISR noch im
+// BLE-Callback passieren.
+static void raiseAlarm(const tempSensor& t, const char* field,
+                       bool gt, double limit, double value) {
+  alarmName      = (t.fullname == "none") ? String(t.mac.c_str()) : t.fullname;
+  alarmCondition = String(field) + " " + (gt ? "gt" : "lt") + " " + String(limit, 1);
+  alarmValue     = String(value, 2) + (strcmp(field, "temp") == 0 ? " C" : " %");
+
+  Serial.printf("ALARM: %s | %s | ist %s\n",
+                alarmName.c_str(), alarmCondition.c_str(), alarmValue.c_str());
+
+  #ifdef MQTT
+  if (client.connected()) {
+    String msg = alarmName + ": " + alarmCondition + " = " + alarmValue;
+    client.publish(alarmtopic.c_str(), msg.c_str(), true);
+  }
+  #endif
+
+  alarmAck = false;
+  alarmPending = true;
+  #ifdef EPAPER
+  displayAlarm();
+  #endif
+  #ifdef AUDIO_ALARM
+  audioAlarm(&alarmAck);          // bricht ab, sobald eine Taste quittiert
+  #endif
+}
+
+// Nach jedem Messzyklus alle Regeln pruefen. Eine Regel loest nur einmal aus
+// und wird erst wieder scharf, wenn der Wert in den gueltigen Bereich
+// zurueckkehrt - sonst alarmiert sie im Minutentakt weiter.
+void checkAlarms() {
+  for (auto it = sensors.begin(); it != sensors.end(); it++) {
+    if (it->type == "new") continue;          // noch keine Messwerte
+
+    if (it->alTempOn) {
+      bool viol = it->alTempGt ? (it->temp > it->alTempLimit)
+                               : (it->temp < it->alTempLimit);
+      if (viol && !it->alTempRaised) {
+        it->alTempRaised = true;
+        raiseAlarm(*it, "temp", it->alTempGt, it->alTempLimit, it->temp);
+      } else if (!viol) {
+        it->alTempRaised = false;
+      }
+    }
+
+    if (it->alHumOn) {
+      bool viol = it->alHumGt ? (it->hum > it->alHumLimit)
+                              : (it->hum < it->alHumLimit);
+      if (viol && !it->alHumRaised) {
+        it->alHumRaised = true;
+        raiseAlarm(*it, "hum", it->alHumGt, it->alHumLimit, it->hum);
+      } else if (!viol) {
+        it->alHumRaised = false;
+      }
+    }
+  }
+}
+
+#ifdef INTERNAL_SHTC3
+// Der interne Sensor wird wie ein BLE-Sensor gefuehrt: gleiche Struktur,
+// gleicher Screen, gleiche MQTT-Topics. Nur die Werte kommen nicht per
+// Advertisement, sondern vom SHTC3 auf derselben Platine.
+void registerInternalSensor() {
+  byte* idb = (byte*)&espID;
+  char buf[18];
+  snprintf(buf, sizeof(buf), "%02x:%02x:%02x:%02x:%02x:%02x",
+           idb[0], idb[1], idb[2], idb[3], idb[4], idb[5]);
+  internalMac = buf;
+
+  String dev = internalMac;
+  dev.replace(":", "");
+
+  tempSensor t;
+  t.mac      = internalMac.c_str();
+  t.device   = dev;
+  t.type     = "SHT3";
+  t.name     = "SHT3";
+  t.fullname = "BLE2MQTT Intern";
+  t.num      = sensors.size() + 1;
+  sensors.push_back(t);
+  internalNum = t.num;
+
+  Serial.printf("Internal sensor registered: #%d %s (%s)\n",
+                internalNum, internalMac.c_str(), dev.c_str());
+}
+
+// Messwerte uebernehmen. RSSI ist hier die WLAN-Feldstaerke des Gateways
+// selbst, die Spannung kommt vom Systemzweig (ADC1_CH3 mit 1:2-Teiler,
+// Beschaltung wie im Hersteller-Beispiel 01_ADC_Test).
+void updateInternalSensor() {
+  if (!internalSensorFound || internalNum == 0) return;
+  if (!internalSensor.read()) return;
+
+  double bat = analogReadMilliVolts(INTERNAL_VBAT_ADC) * 2.0 / 1000.0;
+  int rssi = 0;
+  #ifdef WIFI
+  if (WiFi.status() == WL_CONNECTED) rssi = WiFi.RSSI();
+  #endif
+
+  setSensor(internalMac.c_str(), "SHT3",
+            internalSensor.temp(), internalSensor.hum(), bat, rssi, BAT_VOLT);
+
+  if (num == internalNum) displayDirty = true;   // im Loop gezeichnet
+}
+#endif  // INTERNAL_SHTC3
 
 void printReadings(double temp, double hum, double bat, int rssi, int battype) {
   Serial.print("Temperature:");
@@ -948,10 +1223,11 @@ volatile uint32_t lastButtonMillis = 0;
 
 void IRAM_ATTR toggleButton1() {
   BUTTON_ENTER();
+  if (alarmPending) { alarmAck = true; return; }   // erste Taste quittiert
   if (!displayON) {
     displayON = true;
   } else {
-    if (num < sensors.size()) {
+    if (num < maxScreen()) {
       num++;
     } else {
       num = 0;
@@ -962,13 +1238,14 @@ void IRAM_ATTR toggleButton1() {
 
 void IRAM_ATTR toggleButton2() {
   BUTTON_ENTER();
+  if (alarmPending) { alarmAck = true; return; }   // erste Taste quittiert
   if (!displayON) {
     displayON = true;
   } else {
     if ( num > 0 ) {
       num--;
     } else {
-      num = sensors.size();
+      num = maxScreen();
     }
   }
   BUTTON_REDRAW();
@@ -994,14 +1271,44 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   if (strcmp(topic,conftopic.c_str()) == 0) {
     ptr = strtok(spayload, delimiter);
     if (ptr != NULL) {
-      if (strcmp(ptr,"name") == 0) { // Set Sensor Fullname
+      if (strcmp(ptr,"name") == 0) { // name:<device>:<fullname>
         ptr = strtok(NULL, delimiter);
-        strcpy(temp,ptr);
+        if (ptr == NULL) return;
+        strlcpy(temp,ptr,sizeof(temp));
         device = temp;
         ptr = strtok(NULL, delimiter);
-        strcpy(temp,ptr);
+        if (ptr == NULL) return;
+        strlcpy(temp,ptr,sizeof(temp));
         fullname = temp;
         setSensorName(device,fullname);
+      }
+
+      // alarm:<device>:<temp|hum>:<gt|lt>:<wert>
+      if (strcmp(ptr,"alarm") == 0) {
+        String field, op;
+        ptr = strtok(NULL, delimiter);
+        if (ptr == NULL) return;
+        strlcpy(temp,ptr,sizeof(temp));
+        device = temp;
+        ptr = strtok(NULL, delimiter);
+        if (ptr == NULL) return;
+        strlcpy(temp,ptr,sizeof(temp));
+        field = temp;
+        ptr = strtok(NULL, delimiter);
+        if (ptr == NULL) return;
+        strlcpy(temp,ptr,sizeof(temp));
+        op = temp;
+        ptr = strtok(NULL, delimiter);
+        if (ptr == NULL) return;
+        setSensorAlarm(device, field, op, atof(ptr));
+      }
+
+      // alarmtopic:<topic> - der Rest der Zeile, Topics enthalten kein ':'
+      if (strcmp(ptr,"alarmtopic") == 0) {
+        ptr = strtok(NULL, delimiter);
+        if (ptr == NULL) return;
+        alarmtopic = ptr;
+        Serial.printf("Alarm topic: %s\n", alarmtopic.c_str());
       }
     }   
   }
@@ -1038,7 +1345,9 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
     // getMaxSensor
     if ( strcmp(spayload,"getMaxSensor") == 0 ) {
-      msg = "maxScreen:"+sensors.size();
+      // String(...) ist noetig: "maxScreen:" + size_t waere Zeigerarithmetik
+      // auf dem Literal und hat "Screen:" statt "maxScreen:3" gesendet.
+      msg = "maxScreen:" + String(maxScreen());
       client.publish(conftopic.c_str() ,msg.c_str(), true);
     }
 
@@ -1126,6 +1435,7 @@ void setup() {
   Serial.println("BLE2MQTT starting...");
   Serial.println(version);
 
+
   // Setup Buttons
   #ifdef EPAPER
   pinMode(BUTTON1PIN, INPUT_PULLUP);   // Taster gegen GND
@@ -1167,6 +1477,55 @@ void setup() {
   display.setTextFont(2);
   display.setCursor(0,16);
 
+  #ifdef BOARD_PWR_PIN
+  // Versorgungsschiene der Peripherie freigeben. Der Hersteller ruft dafuer
+  // VBAT_POWER_ON() beim Board-Start auf; ohne sie bleibt der I2C-Bus tot.
+  pinMode(BOARD_PWR_PIN, OUTPUT);
+  digitalWrite(BOARD_PWR_PIN, BOARD_PWR_ON_LEVEL);
+  delay(50);
+  Serial.printf("Board power rail (GPIO %d) on.\n", BOARD_PWR_PIN);
+  #endif
+
+  #ifdef AUDIO_PWR_PIN
+  // Audio-Rail und Endstufe definiert setzen statt floaten lassen - der
+  // Hersteller macht das beim Board-Start ebenso. Beide haengen am selben
+  // Versorgungszweig wie die I2C-Pullups; offen gelassen kam der Bus in
+  // einen Zustand, in dem SDA dauerhaft LOW blieb.
+  pinMode(AUDIO_PWR_PIN, OUTPUT);
+  pinMode(AUDIO_PA_PIN, OUTPUT);
+  digitalWrite(AUDIO_PA_PIN, LOW);                 // Endstufe stumm
+  #ifdef AUDIO_ALARM
+  digitalWrite(AUDIO_PWR_PIN, LOW);                // Rail an (aktiv LOW)
+  #else
+  digitalWrite(AUDIO_PWR_PIN, HIGH);
+  #endif
+  delay(20);
+  #endif
+
+  #ifdef INTERNAL_SHTC3
+  Serial.println("Init internal SHTC3...");
+  internalSensorFound = internalSensor.begin();
+  if (internalSensorFound) {
+    Serial.println("Internal SHTC3 ready.");
+    display.println("Internal sensor OK");
+  } else {
+    Serial.println("Internal SHTC3 NOT found!");
+    display.println("No internal sensor");
+  }
+  DISPLAY_FLUSH();
+  #endif
+
+  #ifdef AUDIO_ALARM
+  Serial.println("Init audio...");
+  if (audioBegin()) {
+    audioStartupBeep();
+    display.println("Audio OK");
+  } else {
+    display.println("No audio");
+  }
+  DISPLAY_FLUSH();
+  #endif
+
   Serial.println("Init BLE Device...");
   //Init BLE device
   BLEDevice::init("");
@@ -1178,6 +1537,14 @@ void setup() {
 
   espID = ESP.getEfuseMac();
   client_id = "ble2mqtt-" + mac2String((byte*) &espID);
+
+  #ifdef INTERNAL_SHTC3
+  // Braucht die ESP-ID, steht deshalb hier und nicht bei der Sensor-Init.
+  if (internalSensorFound) {
+    registerInternalSensor();
+    updateInternalSensor();
+  }
+  #endif
   conftopic = conftopic + client_id;
   cmdtopic = conftopic + "/cmd";
   debugtopic = debugtopic + client_id;
@@ -1267,6 +1634,10 @@ void loop() {
   String topic = "";
   String msg = "";
   String dev = "";
+
+  #ifdef INTERNAL_SHTC3
+  updateInternalSensor();
+  #endif
   
   // Scan for Sensors
   Serial.println("Start Scanning...");
@@ -1340,5 +1711,9 @@ void loop() {
   }
 
   #endif
+
+  // Erst nach dem Publish pruefen, damit openHAB die Werte schon hat.
+  // Laeuft im Loop-Task: Publish, Ton und Display sind hier erlaubt.
+  checkAlarms();
 
 }
