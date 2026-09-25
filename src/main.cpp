@@ -143,6 +143,27 @@ const unsigned char alarmicon[] PROGMEM = {
 	0b00000000, 0b00000000, //                 
 };
 
+// Gefuellte Glocke: dieselbe Silhouette, aber massiv. Zeigt am Sensor-Screen,
+// dass die Regel gerade verletzt ist - nicht nur, dass es eine gibt.
+const unsigned char alarmiconfull[] PROGMEM = {
+	0b00000001, 0b10000000, //        ##       
+	0b00000011, 0b11000000, //       ####      
+	0b00000111, 0b11100000, //      ######     
+	0b00001111, 0b11110000, //     ########    
+	0b00001111, 0b11110000, //     ########    
+	0b00011111, 0b11111000, //    ##########   
+	0b00011111, 0b11111000, //    ##########   
+	0b00111111, 0b11111100, //   ############  
+	0b00111111, 0b11111100, //   ############  
+	0b01111111, 0b11111110, //  ############## 
+	0b01111111, 0b11111110, //  ############## 
+	0b11111111, 0b11111111, // ################
+	0b00000000, 0b00000000, //                 
+	0b00000011, 0b11000000, //       ####      
+	0b00000001, 0b10000000, //        ##       
+	0b00000000, 0b00000000, //                 
+};
+
 #ifdef MQTT
 String basetopic = "/openhab/in/";
 String conftopic = "/openhab/configuration/";
@@ -174,6 +195,12 @@ String alarmtopic = ALARM_TOPIC;
 // Ein unquittierter Alarm. Die ISR setzt nur alarmAck, quittiert wird im Loop.
 volatile bool alarmPending = false;
 volatile bool alarmAck = false;
+#ifdef EPAPER
+// Von der Tasten-ISR gesetzt, im Loop-Task abgearbeitet.
+volatile bool screenFwdPending = false;
+volatile bool screenBackPending = false;
+volatile bool alarmTestPending = false;
+#endif
 String alarmName = "";
 String alarmCondition = "";
 String alarmValue = "";
@@ -582,9 +609,11 @@ void displayScreen(tempSensor t) {
   int16_t tw = epdValueWidth(big, small);
   epdValue(MARGIN_X, 54, big, small);
   if (t.alTempOn) {
-    // Temperatur steht linksbuendig -> Symbol dahinter
+    // Temperatur steht linksbuendig -> Symbol dahinter.
+    // Gefuellt, solange die Regel verletzt ist.
     display.drawBitmap(MARGIN_X + tw + EPD_ICON_GAP, 54 + EPD_ICON_DY,
-                       alarmicon, 16, 16, TFT_WHITE);
+                       t.alTempRaised ? alarmiconfull : alarmicon,
+                       16, 16, TFT_WHITE);
   }
 
   // Luftfeuchte - rechtsbuendig und tiefer, also diagonal zur Temperatur.
@@ -597,7 +626,8 @@ void displayScreen(tempSensor t) {
   if (t.alHumOn) {
     // Feuchte steht rechtsbuendig -> Symbol davor
     display.drawBitmap(hx - EPD_ICON_GAP - 16, 108 + EPD_ICON_DY,
-                       alarmicon, 16, 16, TFT_WHITE);
+                       t.alHumRaised ? alarmiconfull : alarmicon,
+                       16, 16, TFT_WHITE);
   }
 
   // Batterie und Empfangsstaerke teilen sich eine Zeile: links bzw. rechts
@@ -848,9 +878,24 @@ void displaySensor(int i){
 volatile bool displayDirty = false;
 #endif
 
+void screenForward();
+void screenBackward();
+#ifdef EPAPER
+void alarmTest();
+#endif
+
 // Aufgeschobene Neuzeichnung abarbeiten (nur e-Paper, sonst No-Op).
 void serviceDisplay() {
 #ifdef EPAPER
+  // Langer Druck: Alarmtest fuer den angezeigten Sensor. Vor der Quittierung
+  // pruefen, sonst quittiert derselbe Druck den gerade erzeugten Alarm.
+  if (alarmTestPending) {
+    alarmTestPending = false;
+    Serial.println("Langer Tastendruck -> Alarmtest");
+    alarmTest();
+    return;
+  }
+
   // Quittierten Alarm aufloesen und zum vorherigen Screen zurueck
   if (alarmPending && alarmAck) {
     alarmPending = false;
@@ -868,6 +913,11 @@ void serviceDisplay() {
     return;
   }
   if (alarmPending) return;      // Alarmbild stehen lassen
+
+  // Kurzer Druck: blaettern. Die ISR hat nur gemerkt, welche Richtung.
+  if (screenFwdPending)  { screenFwdPending = false;  screenForward(); }
+  if (screenBackPending) { screenBackPending = false; screenBackward(); }
+
   if (displayDirty) {
     displayDirty = false;
     displaySensor(num);
@@ -888,11 +938,10 @@ static void requestSensorScreen(const tempSensor& t) {
 // Einen Alarm ausloesen: melden, anzeigen, Ton. Laeuft ausschliesslich im
 // Loop-Task - Publish und Tonausgabe duerfen weder in der ISR noch im
 // BLE-Callback passieren.
-static void raiseAlarm(const tempSensor& t, const char* field,
-                       bool gt, double limit, double value) {
-  alarmName      = (t.fullname == "none") ? String(t.mac.c_str()) : t.fullname;
-  alarmCondition = String(field) + " " + (gt ? "gt" : "lt") + " " + String(limit, 1);
-  alarmValue     = String(value, 2) + (strcmp(field, "temp") == 0 ? " C" : " %");
+static void fireAlarm(const String& name, const String& cond, const String& val) {
+  alarmName      = name;
+  alarmCondition = cond;
+  alarmValue     = val;
 
   Serial.printf("ALARM: %s | %s | ist %s\n",
                 alarmName.c_str(), alarmCondition.c_str(), alarmValue.c_str());
@@ -912,6 +961,28 @@ static void raiseAlarm(const tempSensor& t, const char* field,
   #ifdef AUDIO_ALARM
   audioAlarm(&alarmAck);          // bricht ab, sobald eine Taste quittiert
   #endif
+}
+
+static void raiseAlarm(const tempSensor& t, const char* field,
+                       bool gt, double limit, double value) {
+  fireAlarm((t.fullname == "none") ? String(t.mac.c_str()) : t.fullname,
+            String(field) + " " + (gt ? "gt" : "lt") + " " + String(limit, 1),
+            String(value, 2) + (strcmp(field, "temp") == 0 ? " C" : " %"));
+}
+
+// Alarmtest fuer den gerade angezeigten Sensor: geht denselben Weg wie ein
+// echter Alarm, also inklusive Publish - damit laesst sich die Kette bis zur
+// Benachrichtigung pruefen. Als "Alarmtest" gekennzeichnet.
+void alarmTest() {
+  if (num == 0) {
+    Serial.println("Alarmtest: Screen 0 ist kein Sensor.");
+    return;
+  }
+  tempSensor t = getSensor(num);
+  if (t.num == 0) { Serial.println("Alarmtest: kein Sensor auf diesem Screen."); return; }
+  fireAlarm((t.fullname == "none") ? String(t.mac.c_str()) : t.fullname,
+            "Alarmtest",
+            String(t.temp, 2) + " C / " + String(t.hum, 2) + " %");
 }
 
 // Nach jedem Messzyklus alle Regeln pruefen. Eine Regel loest nur einmal aus
@@ -1208,48 +1279,65 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
   }
 };
 
+// Screen-Navigation als normale Funktionen - so koennen Taste und
+// MQTT-Kommando denselben Weg nehmen, ohne dass die ISR mitzeichnet.
+static void requestRedraw() {
 #ifdef EPAPER
-volatile uint32_t lastButtonMillis = 0;
-
-#define BUTTON_ENTER()                                   \
-  uint32_t _now = millis();                              \
-  if (_now - lastButtonMillis < 300) return;             \
-  lastButtonMillis = _now;
-#define BUTTON_REDRAW() displayDirty = true
+  displayDirty = true;
 #else
-#define BUTTON_ENTER()
-#define BUTTON_REDRAW() displaySensor(num)
+  displaySensor(num);
+#endif
+}
+
+void screenForward() {
+  if (!displayON) { displayON = true; }
+  else { num = (num < maxScreen()) ? num + 1 : 0; }
+  requestRedraw();
+}
+
+void screenBackward() {
+  if (!displayON) { displayON = true; }
+  else { num = (num > 0) ? num - 1 : maxScreen(); }
+  requestRedraw();
+}
+
+#ifdef EPAPER
+// Die ISR misst nur die Druckdauer und setzt Flags; gezeichnet, gemeldet und
+// getoent wird im Loop-Task. Interrupt daher auf CHANGE statt RISING.
+#ifndef LONG_PRESS_MS
+#define LONG_PRESS_MS 1500
 #endif
 
-void IRAM_ATTR toggleButton1() {
-  BUTTON_ENTER();
-  if (alarmPending) { alarmAck = true; return; }   // erste Taste quittiert
-  if (!displayON) {
-    displayON = true;
-  } else {
-    if (num < maxScreen()) {
-      num++;
-    } else {
-      num = 0;
-    }
+volatile uint32_t btn1DownMs = 0, btn2DownMs = 0;
+
+static void IRAM_ATTR buttonEdge(uint8_t pin, volatile uint32_t* downMs,
+                                 volatile bool* shortPress, bool allowTest) {
+  uint32_t now = millis();
+  if (digitalRead(pin) == LOW) {        // gedrueckt (Taster gegen GND)
+    *downMs = now;
+    return;
   }
-  BUTTON_REDRAW();
+  if (*downMs == 0) return;             // Loslassen ohne erfasstes Druecken
+  uint32_t held = now - *downMs;
+  *downMs = 0;
+  if (held < 40) return;                // Prellen
+  if (alarmPending) { alarmAck = true; return; }        // erste Taste quittiert
+  if (allowTest && held >= LONG_PRESS_MS) { alarmTestPending = true; return; }
+  *shortPress = true;
 }
 
-void IRAM_ATTR toggleButton2() {
-  BUTTON_ENTER();
-  if (alarmPending) { alarmAck = true; return; }   // erste Taste quittiert
-  if (!displayON) {
-    displayON = true;
-  } else {
-    if ( num > 0 ) {
-      num--;
-    } else {
-      num = maxScreen();
-    }
-  }
-  BUTTON_REDRAW();
-}
+// Der lange Druck liegt bewusst nur auf Button 2 (BOOT). Button 1 ist der
+// PWR-Taster des Boards - laenger gehalten schaltet dessen Hardware-Latch das
+// Geraet ab, ein Alarmtest waere dort also nicht zuverlaessig ausloesbar.
+void IRAM_ATTR toggleButton1() { buttonEdge(BUTTON1PIN, &btn1DownMs, &screenFwdPending, false); }
+void IRAM_ATTR toggleButton2() { buttonEdge(BUTTON2PIN, &btn2DownMs, &screenBackPending, true); }
+
+#else   // TFT-Boards: unveraendert, Aktion direkt beim Loslassen
+
+void IRAM_ATTR toggleButton1() { screenForward(); }
+void IRAM_ATTR toggleButton2() { screenBackward(); }
+
+#endif
 
 #ifdef MQTT
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
@@ -1335,12 +1423,12 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
     // setScreen+
     if ( strcmp(spayload,"setScreen+") == 0 ) {
-      toggleButton1();
+      if (alarmPending) alarmAck = true; else screenForward();
     }
 
     // setScreen-
     if ( strcmp(spayload,"setScreen-") == 0 ) {
-      toggleButton2();
+      if (alarmPending) alarmAck = true; else screenBackward();
     }
 
     // getMaxSensor
@@ -1626,8 +1714,15 @@ void setup() {
   #endif
 
   // Attach Button Callbacks
+  #ifdef EPAPER
+  // CHANGE statt RISING: nur so laesst sich die Druckdauer messen und damit
+  // ein langer Druck (Alarmtest) von einem kurzen (blaettern) unterscheiden.
+  attachInterrupt(BUTTON1PIN, toggleButton1, CHANGE);
+  attachInterrupt(BUTTON2PIN, toggleButton2, CHANGE);
+  #else
   attachInterrupt(BUTTON1PIN, toggleButton1, RISING);
   attachInterrupt(BUTTON2PIN, toggleButton2, RISING);
+  #endif
 }
 
 void loop() {

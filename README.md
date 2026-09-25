@@ -186,6 +186,7 @@ GPIO 17 = VBAT-Freigabe (aktiv HIGH, für Akkubetrieb), GPIO 42 = Audio-Freigabe
 | `AUDIO_ALARM_REPEATS` | Anzahl der Doppeltöne je Alarm (Standard 10) |
 | `AUDIO_VOLUME` | ES8311-Register 0x32, dB = −95,5 + 0,5 × Wert |
 | `ALARM_TOPIC` | Standard-Topic, per Config-Zeile `alarmtopic:` überschreibbar |
+| `LONG_PRESS_MS` | Schwelle für den langen Druck (Standard 1500 ms) |
 
 > **I²C-Bus beim Start.** Bleiben `AUDIO_PWR_PIN` und `AUDIO_PA_PIN` offen, kann
 > der gemeinsame Bus in einen Zustand geraten, in dem SDA dauerhaft LOW bleibt
@@ -214,7 +215,13 @@ pio device monitor -e lilygo-t-display-s3
 | Button | T-Display-S3 | TTGO T-Display | e-Paper-S3 | Funktion |
 |---|---|---|---|---|
 | Button 1 | GPIO 14 | GPIO 35 | GPIO 18 (PWR) | Screen vorwärts; **beim Boot gedrückt halten → WLAN-Einstellungen zurücksetzen** |
-| Button 2 | GPIO 0 | GPIO 0 | GPIO 0 (BOOT) | Screen rückwärts |
+| Button 2 | GPIO 0 | GPIO 0 | GPIO 0 (BOOT) | Screen rückwärts; **lang drücken → Alarmtest** (nur e-Paper) |
+
+Bei der e-Paper-Variante hängen die Interrupts auf `CHANGE` statt `RISING` –
+nur so lässt sich die Druckdauer messen und ein langer Druck von einem kurzen
+unterscheiden. Die ISR misst ausschließlich und setzt Flags; geblättert,
+gemeldet und getönt wird im Loop-Task. Steht ein Alarm an, quittiert jeder
+Tastendruck, ohne den Screen zu wechseln.
 
 Bei der e-Paper-Variante sind das die beiden Taster des Boards, beide aktiv LOW
 mit internem Pullup. Die Pegel werden beim Start auf der seriellen Konsole
@@ -289,7 +296,22 @@ längst erledigten Alarm als vermeintlich offenen.
 
 Auf dem Sensor-Screen markiert eine **Glocke** den Wert, für den eine Regel
 konfiguriert ist – hinter der linksbündigen Temperatur, vor der rechtsbündigen
-Feuchte.
+Feuchte. Sie ist als **Umriss** gezeichnet, solange der Wert im Rahmen liegt,
+und **ausgefüllt**, solange die Regel verletzt ist. Damit sieht man auch ohne
+Alarmbild, welcher Wert gerade aus dem Rahmen läuft.
+
+#### Alarmtest
+
+Ein **langer Druck (≥ 1,5 s) auf Button 2 (BOOT)** löst einen Testalarm für den
+gerade angezeigten Sensor aus. Er nimmt denselben Weg wie ein echter Alarm –
+inklusive MQTT-Publish –, sodass sich die Kette bis zur Benachrichtigung prüfen
+lässt. Gemeldet wird `<fullname>: Alarmtest = <temp> C / <hum> %`.
+
+> Der lange Druck liegt bewusst **nicht** auf Button 1: Das ist der PWR-Taster
+> des Boards, dessen Hardware-Latch beim Halten abschaltet.
+
+Auf Screen 0 (Datum/Uhrzeit) passiert nichts, dort ist kein Sensor. Die Dauer
+ist über `LONG_PRESS_MS` einstellbar.
 
 Auf der e-Paper-Variante zusätzlich:
 
