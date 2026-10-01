@@ -18,6 +18,9 @@
 #include <WiFiManager.h>
 #include <aes/esp_aes.h>
 #include <array>
+#include <vector>
+#include <esp_task_wdt.h>
+#include <esp_system.h>
 
 #if BOARD==ESP32S3
   #define S3
@@ -258,6 +261,52 @@ struct tempSensor {
 };
 
 std::list<tempSensor> sensors;
+
+// Die Liste wird von zwei Tasks benutzt: der BLE-Callback (BTC_TASK) legt
+// Sensoren an und schreibt Messwerte, der Loop-Task liest, zeichnet und
+// publiziert. Ohne Sperre kann ein push_back() oder eine String-Zuweisung
+// mitten in eine laufende Iteration fallen - das korrumpiert den Heap und
+// zeigt sich erst Stunden spaeter als Absturz oder Haenger. Rekursiv, weil
+// getSensor(mac, name) intern weitere Zugriffe macht.
+static SemaphoreHandle_t sensorsMutex = nullptr;
+struct SensorsLock {
+  SensorsLock()  { xSemaphoreTakeRecursive(sensorsMutex, portMAX_DELAY); }
+  ~SensorsLock() { xSemaphoreGiveRecursive(sensorsMutex); }
+};
+
+// Ein neuer Sensor braucht seine Config vom Broker. Der BLE-Callback merkt
+// das nur vor - PubSubClient ist nicht threadsicher, publiziert wird im Loop.
+volatile bool configRequestPending = false;
+
+// --- Selbstueberwachung ------------------------------------------------------
+// Task-Watchdog fuer den Loop-Task: bleibt er laenger als WDT_TIMEOUT_S ohne
+// Lebenszeichen stehen, startet der ESP32 neu. Grosszuegig bemessen, weil
+// Alarmton, e-Paper-Refresh und MQTT-Connect legitim einige Sekunden blockieren.
+#ifndef WDT_TIMEOUT_S
+#define WDT_TIMEOUT_S 120
+#endif
+// Haengt nicht der Loop, sondern ein Funkstack (BLE liefert nichts mehr, WLAN
+// oder MQTT kommen nicht zurueck), greift der Watchdog nicht. Dafuer gibt es
+// diese Grenzen; danach wird neu gestartet. 0 schaltet die Pruefung ab.
+#ifndef BLE_SILENT_RESTART_MIN
+#define BLE_SILENT_RESTART_MIN 10
+#endif
+#ifndef MQTT_OFFLINE_RESTART_MIN
+#define MQTT_OFFLINE_RESTART_MIN 15
+#endif
+// Wie lange das WLAN-Konfigurationsportal beim Start offen bleibt, wenn keine
+// Verbindung zustande kommt. Ohne Grenze wartet das Geraet nach einem
+// Stromausfall, bei dem der Router langsamer hochfaehrt, ewig im Portal.
+#ifndef WIFI_PORTAL_TIMEOUT_S
+#define WIFI_PORTAL_TIMEOUT_S 180
+#endif
+volatile uint32_t lastAdvMs = 0;     // letztes BLE-Advertisement (beliebiges Geraet)
+// Zuletzt eine MQTT-Nachricht EMPFANGEN. Bewusst nicht "verbunden": eine
+// halbtote Verbindung meldet connected() und liefert trotzdem nichts - genau
+// das Bild "keine Werte, keine Uhrzeit". Damit die Pruefung nicht von openHAB
+// abhaengt, abonniert das Geraet sein eigenes Status-Topic (Echo ueber den
+// Broker); die Uhrzeit-Meldungen zaehlen ebenso.
+volatile uint32_t lastMqttOkMs = 0;
 #ifdef C11
 std::__cxx11::string string_to_hex(const std::__cxx11::string& input, int length = 0)
 #else
@@ -297,6 +346,7 @@ int debugPrintln(String msg)
 }
 
 tempSensor getSensor(std::string mac, String name) {
+  SensorsLock lock;
   for (tempSensor t : sensors) {
     if (t.mac == mac) return t;
   }
@@ -307,14 +357,12 @@ tempSensor getSensor(std::string mac, String name) {
   t1.name = name;
   t1.num = sensors.size() + 1;
   sensors.push_back(t1);
-  #ifdef MQTT
-  String msg = "getconfig:"+client_id;
-  client.publish(getconftopic.c_str(),msg.c_str());
-  #endif
+  configRequestPending = true;     // publiziert der Loop-Task
   return sensors.back();
 }
 
 tempSensor getSensor(std::string mac) {
+  SensorsLock lock;
   tempSensor t1;
   for (tempSensor t : sensors) {
     if (t.mac == mac) return t;
@@ -323,6 +371,7 @@ tempSensor getSensor(std::string mac) {
 }
 
 tempSensor getSensor(int n) {
+  SensorsLock lock;
   tempSensor t1;
   for (tempSensor t : sensors) {
     if (t.num == n) return t;
@@ -331,6 +380,7 @@ tempSensor getSensor(int n) {
 }
 
 void setSensor(std::string mac, String type, double temp, double hum, double bat, int rssi, int battype) {
+  SensorsLock lock;
   for (auto it = sensors.rbegin(); it != sensors.rend(); it++) {
     if (it->mac == mac) {
       it->type = type;
@@ -355,6 +405,7 @@ void setSensorAlarm(String device, String field, String op, double limit) {
     Serial.printf("Alarm config: unbekannter Operator '%s'\n", op.c_str());
     return;
   }
+  SensorsLock lock;
   for (auto it = sensors.rbegin(); it != sensors.rend(); it++) {
     if (it->device != device) continue;
 
@@ -378,6 +429,7 @@ void setSensorAlarm(String device, String field, String op, double limit) {
 }
 
 void setSensorName(String device, String fullname) {
+  SensorsLock lock;
   for (auto it = sensors.rbegin(); it != sensors.rend(); it++) {
     if (it->device == device) {
       it->fullname = fullname;
@@ -911,21 +963,20 @@ void displaySensor(int i){
   }
 }
 
-#ifdef EPAPER
 // Ein e-Paper-Refresh dauert mehrere hundert Millisekunden und braucht viel
 // Stack (Float-printf zieht ueber _dtoa_r einige hundert Byte). Weder der
 // Tasten-Interrupt noch der BLE-Callback duerfen deshalb selbst zeichnen:
 // der eine laeuft im Interrupt, der andere auf dem knappen Stack des
 // Bluetooth-Tasks (BTC_TASK). Beide merken den Wunsch nur vor, gezeichnet
-// wird in serviceDisplay() aus dem Loop-Task heraus.
+// wird in serviceDisplay() aus dem Loop-Task heraus. Gilt auch fuers TFT:
+// TFT_eSPI ist ebenso wenig threadsicher.
 volatile bool displayDirty = false;
-#endif
 
 void screenForward();
 void screenBackward();
 void alarmTest();
 
-// Aufgeschobene Neuzeichnung abarbeiten (nur e-Paper, sonst No-Op).
+// Aufgeschobene Neuzeichnung und Tastenwuensche abarbeiten.
 void serviceDisplay() {
   // Langer Druck: Alarmtest fuer den angezeigten Sensor. Vor der Quittierung
   // pruefen, sonst quittiert derselbe Druck den gerade erzeugten Alarm.
@@ -961,22 +1012,16 @@ void serviceDisplay() {
   if (screenFwdPending)  { screenFwdPending = false;  screenForward(); }
   if (screenBackPending) { screenBackPending = false; screenBackward(); }
 
-#ifdef EPAPER
   if (displayDirty) {
     displayDirty = false;
     displaySensor(num);
   }
-#endif
 }
 
 // Screen dieses Sensors anzeigen - wird aus dem BLE-Callback aufgerufen.
 static void requestSensorScreen(const tempSensor& t) {
   num = t.num;
-#ifdef EPAPER
   displayDirty = true;
-#else
-  displaySensor(t.num);
-#endif
 }
 
 // Einen Alarm ausloesen: melden, anzeigen, Ton. Laeuft ausschliesslich im
@@ -1009,11 +1054,13 @@ static void fireAlarm(const String& name, const String& cond, const String& val)
   #endif
 }
 
-static void raiseAlarm(const tempSensor& t, const char* field,
-                       bool gt, double limit, double value) {
-  fireAlarm((t.fullname == "none") ? String(t.mac.c_str()) : t.fullname,
-            String(field) + " " + (gt ? "gt" : "lt") + " " + String(limit, 1),
-            String(value, 2) + (strcmp(field, "temp") == 0 ? " C" : " %"));
+struct PendingAlarm { String name, cond, val; };
+
+static PendingAlarm makeAlarm(const tempSensor& t, const char* field,
+                              bool gt, double limit, double value) {
+  return { (t.fullname == "none") ? String(t.mac.c_str()) : t.fullname,
+           String(field) + " " + (gt ? "gt" : "lt") + " " + String(limit, 1),
+           String(value, 2) + (strcmp(field, "temp") == 0 ? " C" : " %") };
 }
 
 // Alarmtest fuer den gerade angezeigten Sensor: geht denselben Weg wie ein
@@ -1035,6 +1082,11 @@ void alarmTest() {
 // und wird erst wieder scharf, wenn der Wert in den gueltigen Bereich
 // zurueckkehrt - sonst alarmiert sie im Minutentakt weiter.
 void checkAlarms() {
+  // Unter der Sperre nur pruefen und vormerken. Ausgeloest wird danach: Ton
+  // und Refresh blockieren Sekunden, so lange darf der BLE-Task nicht warten.
+  std::vector<PendingAlarm> fired;
+  {
+  SensorsLock lock;
   for (auto it = sensors.begin(); it != sensors.end(); it++) {
     if (it->type == "new") continue;          // noch keine Messwerte
 
@@ -1043,7 +1095,7 @@ void checkAlarms() {
                                : (it->temp < it->alTempLimit);
       if (viol && !it->alTempRaised) {
         it->alTempRaised = true;
-        raiseAlarm(*it, "temp", it->alTempGt, it->alTempLimit, it->temp);
+        fired.push_back(makeAlarm(*it, "temp", it->alTempGt, it->alTempLimit, it->temp));
       } else if (!viol) {
         it->alTempRaised = false;
       }
@@ -1054,12 +1106,14 @@ void checkAlarms() {
                               : (it->hum < it->alHumLimit);
       if (viol && !it->alHumRaised) {
         it->alHumRaised = true;
-        raiseAlarm(*it, "hum", it->alHumGt, it->alHumLimit, it->hum);
+        fired.push_back(makeAlarm(*it, "hum", it->alHumGt, it->alHumLimit, it->hum));
       } else if (!viol) {
         it->alHumRaised = false;
       }
     }
   }
+  }
+  for (const PendingAlarm& a : fired) fireAlarm(a.name, a.cond, a.val);
 }
 
 #ifdef INTERNAL_SHTC3
@@ -1082,8 +1136,11 @@ void registerInternalSensor() {
   t.type     = "SHT3";
   t.name     = "SHT3";
   t.fullname = "BLE2MQTT Intern";
-  t.num      = sensors.size() + 1;
-  sensors.push_back(t);
+  {
+    SensorsLock lock;
+    t.num = sensors.size() + 1;
+    sensors.push_back(t);
+  }
   internalNum = t.num;
 
   Serial.printf("Internal sensor registered: #%d %s (%s)\n",
@@ -1176,6 +1233,7 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
     double bat;
     int battype;
 
+    lastAdvMs = millis();               // BLE lebt - fuer restartIfStuck()
     int rssi = advertisedDevice.getRSSI();
 
     std::string mac = advertisedDevice.getAddress().toString();
@@ -1305,14 +1363,16 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
     *     VICTRON_MANUFACTURER_ID = 0x02E1;
     *
     */
-    if (mac.substr(0,8) == VICTRON_BT_mac_OUI_PREFIX) {
+    if (mac.substr(0,8) == VICTRON_BT_mac_OUI_PREFIX && strdata.length() >= 4) {
       Serial.print("Victron Data Received: ");
       Serial.println(mac.c_str());
       char recordtype = cdata[0];
       u_int16_t noonce = cdata[1] + 256 * cdata[2];
       char byte0 = cdata[3];
-      debugPrintln("Received Victron Data: Recordtype=" + recordtype);
-      debugPrintln("  noonce=" + String(noonce) + " byte0=" + byte0);
+      // String(...) noetig: "..." + char waere Zeigerarithmetik auf dem
+      // Literal und liest bis zu 255 Byte dahinter.
+      debugPrintln("Received Victron Data: Recordtype=" + String((int)recordtype));
+      debugPrintln("  noonce=" + String(noonce) + " byte0=" + String((int)byte0));
 
       if (recordtype == 0x01) { // Solar Charger
         u_int8_t *data;
@@ -1411,8 +1471,50 @@ void serviceButtons() {
 void IRAM_ATTR toggleButton1() { if (alarmPending) alarmAck = true; }
 void IRAM_ATTR toggleButton2() { if (alarmPending) alarmAck = true; }
 
+// Warum der letzte Neustart? Wird mit der Online-Meldung publiziert, damit
+// sich ein Haenger hinterher einordnen laesst (TASK_WDT = Watchdog hat
+// gegriffen, PANIC = Absturz, BROWNOUT = Versorgung, SW = restartIfStuck).
+static const char* resetReasonText() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:   return "POWERON";
+    case ESP_RST_EXT:       return "EXT";
+    case ESP_RST_SW:        return "SW";
+    case ESP_RST_PANIC:     return "PANIC";
+    case ESP_RST_INT_WDT:   return "INT_WDT";
+    case ESP_RST_TASK_WDT:  return "TASK_WDT";
+    case ESP_RST_WDT:       return "WDT";
+    case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
+    case ESP_RST_BROWNOUT:  return "BROWNOUT";
+    case ESP_RST_SDIO:      return "SDIO";
+    default:                return "UNKNOWN";
+  }
+}
+
+// Neustart, wenn ein Funkstack offenbar haengt (siehe BLE_SILENT_RESTART_MIN
+// und MQTT_OFFLINE_RESTART_MIN). Nicht bei offenem Alarm: das Alarmbild ist
+// dann wichtiger als die Verbindung, und nach dem Neustart waere es weg.
+static void restartIfStuck() {
+  if (alarmPending) return;
+  // Erst den Zeitstempel, dann millis(): setzt der BLE-Task lastAdvMs
+  // dazwischen neu, liefe "now - adv" sonst ueber und loeste faelschlich aus.
+  uint32_t adv = lastAdvMs;
+  uint32_t mq  = lastMqttOkMs;
+  uint32_t now = millis();
+  const char* why = nullptr;
+  if (BLE_SILENT_RESTART_MIN > 0 && now - adv > BLE_SILENT_RESTART_MIN * 60000UL)
+    why = "keine BLE-Advertisements";
+  else if (MQTT_OFFLINE_RESTART_MIN > 0 && now - mq > MQTT_OFFLINE_RESTART_MIN * 60000UL)
+    why = "keine MQTT-Nachrichten";
+  if (!why) return;
+  Serial.printf("Selbstueberwachung: %s - Neustart.\n", why);
+  Serial.flush();
+  delay(100);
+  ESP.restart();
+}
+
 #ifdef MQTT
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  lastMqttOkMs = millis();            // Ende-zu-Ende-Lebenszeichen
   char spayload[length + 1];
   memcpy(spayload, payload, length);
   spayload[length] = '\0';
@@ -1563,7 +1665,9 @@ void mqttReconnect() {
       client.subscribe(cmdtopic.c_str());
       client.subscribe(timetopic.c_str());
       client.subscribe(datetopic.c_str());
-      String msg = "Online " + version + ": SSID=" + ssid + " IP=" + WiFi.localIP().toString() + " Broker=" + broker.toString();
+      client.subscribe((debugtopic + "/status").c_str());   // Echo, s. lastMqttOkMs
+      String msg = "Online " + version + ": SSID=" + ssid + " IP=" + WiFi.localIP().toString() + " Broker=" + broker.toString()
+                 + " Reset=" + resetReasonText() + " Uptime=" + String(millis() / 1000) + "s";
       client.publish(debugtopic.c_str(),msg.c_str(),true);
       display_indicators(TFT_DARKGREY);
     } else {
@@ -1594,7 +1698,9 @@ void setup() {
   Serial.begin(115200);
   Serial.println("BLE2MQTT starting...");
   Serial.println(version);
+  Serial.printf("Reset reason: %s\n", resetReasonText());
 
+  sensorsMutex = xSemaphoreCreateRecursiveMutex();
 
   // Setup Buttons
   #ifdef EPAPER
@@ -1746,6 +1852,7 @@ void setup() {
 
   bool res;
   wm.setConnectTimeout(10);
+  wm.setConfigPortalTimeout(WIFI_PORTAL_TIMEOUT_S);  // danach ohne WLAN weiter
   res = wm.autoConnect("BLE2MQTT");   // offener Konfig-AP, kein Passwort
   if (!res) {
     Serial.println("Failed to connect to WiFi!");
@@ -1790,12 +1897,21 @@ void setup() {
   // ein langer Druck (Alarmtest) von einem kurzen (blaettern) unterscheiden.
   attachInterrupt(BUTTON1PIN, toggleButton1, CHANGE);
   attachInterrupt(BUTTON2PIN, toggleButton2, CHANGE);
+
+  // Erst jetzt: Das WLAN-Portal oben darf legitim Minuten dauern.
+  // Zeitbasis fuer restartIfStuck() ist das Ende des Setups.
+  lastAdvMs = millis();
+  lastMqttOkMs = millis();
+  esp_task_wdt_init(WDT_TIMEOUT_S, true);   // true = Panic -> Neustart
+  esp_task_wdt_add(NULL);                   // Loop-Task ueberwachen
 }
 
 void loop() {
   String topic = "";
   String msg = "";
   String dev = "";
+
+  esp_task_wdt_reset();
 
   #ifdef INTERNAL_SHTC3
   updateInternalSensor();
@@ -1807,9 +1923,20 @@ void loop() {
   pBLEScan->start(0,nullptr,false);
   u_long startmillis = millis();
   while (millis() - startmillis < 60000 && millis() >= startmillis) {
+    esp_task_wdt_reset();
     client.loop();
+    #ifdef MQTT
+    if (configRequestPending && client.connected()) {
+      configRequestPending = false;
+      msg = "getconfig:" + client_id;
+      client.publish(getconftopic.c_str(), msg.c_str());
+    }
+    #endif
     serviceButtons();
     serviceDisplay();
+    // Nicht im Leerlauf durchdrehen: gibt die CPU frei (und senkt vermutlich
+    // die Eigenerwaermung). 10 ms liegen weit unter der Tasten-Entprellzeit.
+    delay(10);
   }
   pBLEScan->stop();
   Serial.println("Stop Scanning...");
@@ -1830,7 +1957,11 @@ void loop() {
      
       display_indicators(TFT_GREEN);
 
-      for (tempSensor t : sensors) {
+      // Kopie ziehen, damit der BLE-Task waehrend des Publish nicht wartet
+      std::list<tempSensor> snapshot;
+      { SensorsLock lock; snapshot = sensors; }
+      for (tempSensor t : snapshot) {
+        esp_task_wdt_reset();
         serviceButtons();     // auch waehrend des Publish erreichbar bleiben
         Serial.print("Publish Sensor: ");
         Serial.print(t.mac.c_str());
@@ -1870,6 +2001,14 @@ void loop() {
         msg = t.lastupdate;
         client.publish(topic.c_str(),msg.c_str(),true);
       }
+
+      // Lebenszeichen: Laufzeit und Heap. Ein stetig fallender Heap-Minimum
+      // deutet auf ein Leck hin, das irgendwann zum Haenger fuehrt.
+      topic = debugtopic + "/status";
+      msg = "Uptime=" + String(millis() / 1000) + "s Heap=" + String(ESP.getFreeHeap())
+            + " MinHeap=" + String(ESP.getMinFreeHeap()) + " Reset=" + resetReasonText();
+      client.publish(topic.c_str(), msg.c_str());
+
       display_indicators(TFT_DARKGREY);
     }
   }
@@ -1880,4 +2019,5 @@ void loop() {
   // Laeuft im Loop-Task: Publish, Ton und Display sind hier erlaubt.
   checkAlarms();
 
+  restartIfStuck();
 }

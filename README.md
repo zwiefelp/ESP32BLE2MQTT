@@ -254,6 +254,42 @@ zurückgesetzt), startet das Gerät einen **offenen Konfig-Accesspoint**:
 3. Ziel-WLAN auswählen, Passwort eintragen, speichern. Das Gerät verbindet
    sich danach automatisch und startet BLE-Scan + MQTT.
 
+## Selbstüberwachung
+
+Das Gerät läuft unbeaufsichtigt. Hängt es, startet es selbst neu, statt stehen
+zu bleiben:
+
+| Mechanismus | Greift, wenn … | Default | Flag |
+|---|---|---|---|
+| Task-Watchdog | der Loop-Task blockiert | 120 s | `WDT_TIMEOUT_S` |
+| BLE-Funkstille | kein einziges BLE-Advertisement eintrifft | 10 min | `BLE_SILENT_RESTART_MIN` |
+| MQTT tot | keine MQTT-Nachricht mehr **empfangen** wird – deckt WLAN-Ausfall, Broker-Ausfall und halbtote Verbindungen ab | 15 min | `MQTT_OFFLINE_RESTART_MIN` |
+| WLAN-Portal | beim Start keine Verbindung zustande kommt – das Portal schließt danach, statt ewig zu warten | 180 s | `WIFI_PORTAL_TIMEOUT_S` |
+
+Für die MQTT-Prüfung zählt nicht `client.connected()`, sondern ob tatsächlich
+etwas ankommt: Eine halbtote Verbindung meldet „verbunden“ und liefert trotzdem
+nichts. Damit das nicht von openHAB abhängt, abonniert das Gerät sein eigenes
+Status-Topic. Das Echo des minütlichen Status-Publish über den Broker genügt,
+die Uhrzeit-Meldungen zählen ebenso.
+
+`0` schaltet die beiden Minuten-Prüfungen ab. Steht ein unquittierter Alarm an,
+wird wegen BLE oder MQTT nicht neu gestartet – sonst ginge das Alarmbild
+verloren. Der Watchdog greift trotzdem.
+
+Zur Diagnose meldet das Gerät den **Grund des letzten Neustarts**: in der
+Online-Meldung auf `/openhab/debug/<client-id>` (`Reset=TASK_WDT`, `PANIC`,
+`BROWNOUT`, `SW` …) und nach jedem Publish-Zyklus auf
+`/openhab/debug/<client-id>/status` mit Laufzeit und Heap
+(`Uptime=… Heap=… MinHeap=… Reset=…`). `SW` heißt: Neustart durch die
+Selbstüberwachung oder das Kommando `restart`. `UNKNOWN` erscheint nach einem Reset über
+USB (z. B. nach dem Flashen) – dafür kennt das verwendete ESP-IDF 4.4 keinen
+eigenen Wert. Fällt `MinHeap` über Tage
+stetig, deutet das auf ein Speicherleck.
+
+Die Sensorliste ist per Mutex gegen gleichzeitigen Zugriff von BLE-Callback
+und Loop-Task geschützt. Der BLE-Callback publiziert und zeichnet nicht mehr
+selbst, er merkt beides nur für den Loop-Task vor.
+
 ## MQTT-Schnittstelle
 
 Der Broker wird in `main.cpp` anhand der verbundenen SSID gewählt (Port 1883).
