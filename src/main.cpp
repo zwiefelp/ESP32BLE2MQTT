@@ -29,7 +29,7 @@
 #define WIFI
 #define MQTT
 bool DEBUG = false;
-String version = "V3.1";
+String version = "V3.1.1";
 
 #define CONFIG_ARDUINO_LOOP_STACK_SIZE 16384
 
@@ -329,6 +329,20 @@ bool mqttWasConnected = false;
 #endif
 uint32_t wifiDownSince = 0;           // 0 = verbunden
 uint32_t lastWifiAction = 0;
+
+// Absturzstelle eingrenzen: der Loop-Task setzt beim Eintritt in jeden Abschnitt eine Marke,
+// der BLE-Callback (eigener Task) ein Flag. Beides ueberlebt Panic/Watchdog im RTC-Speicher und
+// geht nach einem solchen Reset mit der Startmeldung raus (Stage=<marke> BLEcb=1).
+#define STAGE_MAGIC 0x57A6E001UL
+RTC_NOINIT_ATTR uint32_t stageMagic;
+RTC_NOINIT_ATTR char stage[16];
+RTC_NOINIT_ATTR volatile uint8_t bleCbActive;
+String crashStage = "";               // nach Panic/Watchdog: Marke des abgestuerzten Laufs
+
+static inline void setStage(const char* s) {
+  strlcpy(stage, s, sizeof(stage));
+  stageMagic = STAGE_MAGIC;
+}
 
 static void markRestart(const char* why) {
   strlcpy(restartWhy, why, sizeof(restartWhy));
@@ -1274,6 +1288,8 @@ bool decrypt_message_(const u_int8_t *crypted_data, const u_int8_t crypted_len,
 //Callback function that gets called, when another device's advertisement has been received
 class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
   void onResult(BLEAdvertisedDevice advertisedDevice) {
+    // Flag fuer die Absturzdiagnose; per Guard auch bei vorzeitigem return zurueckgesetzt
+    struct CbGuard { CbGuard() { bleCbActive = 1; } ~CbGuard() { bleCbActive = 0; } } cbGuard;
     tempSensor t;
     double temp;
     double hum;
@@ -1729,6 +1745,7 @@ void mqttReconnect() {
       if (lastMqttState != 99) msg += " MQTTrc=" + String(lastMqttState);
       if (lastWifiReason != 0) msg += " WiFiReason=" + String(lastWifiReason);
       if (restartReason.length()) { msg += " Restart=" + restartReason; restartReason = ""; }
+      if (crashStage.length()) { msg += " Stage=" + crashStage; crashStage = ""; }
       client.publish(debugtopic.c_str(),msg.c_str(),true);
       display_indicators(TFT_DARKGREY);
     } else {
@@ -1757,6 +1774,21 @@ String mac2String(byte ar[]) {
 void setup() {
   //Start serial communication
   Serial.begin(115200);
+  // Kein Serial.setTxTimeoutMs(0): HWCDC::write zaehlt dann "tries" von 0 herunter (Unterlauf)
+  // und haengt, wenn ein Host angeschlossen ist, aber nicht liest (V3.1.1-Test: TASK_WDT in
+  // mqttloop). Der Standard (250 ms) erkennt einen nicht lesenden Host und verwirft danach.
+  // Marke des vorigen Laufs auswerten, bevor setStage() sie ueberschreibt
+  {
+    esp_reset_reason_t rr = esp_reset_reason();
+    bool crashed = rr == ESP_RST_PANIC || rr == ESP_RST_INT_WDT || rr == ESP_RST_TASK_WDT || rr == ESP_RST_WDT;
+    if (crashed && stageMagic == STAGE_MAGIC) {
+      stage[sizeof(stage) - 1] = '\0';
+      crashStage = stage;
+      if (bleCbActive) crashStage += " BLEcb=1";
+    }
+    bleCbActive = 0;
+  }
+  setStage("setup");
   Serial.println("BLE2MQTT starting...");
   Serial.println(version);
   Serial.printf("Reset reason: %s\n", resetReasonText());
@@ -1885,14 +1917,19 @@ void setup() {
   debugtopic = debugtopic + client_id;
 
   #ifdef WIFI
+  setStage("setupwifi");
   
   //WiFiManager, Local intialization. Once its business is done, there is no need to keep it around
   Serial.println("Creating WiFi Manager...");
-  WiFiManager wm;  
-  WiFi.mode(WIFI_STA);   
+  // Handler VOR WiFi.mode() registrieren: danach laeuft der Event-Task schon und iteriert
+  // ueber die Handler-Liste - ein onEvent() zur gleichen Zeit verschiebt die Liste im Speicher
+  // und der Task liest freigegebenen Speicher (V3.1: IllegalInstruction in
+  // WiFiEventCbList-Kopie, WiFiGeneric.cpp:747, Boot-Schleife je nach Timing)
   WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
     lastWifiReason = info.wifi_sta_disconnected.reason;
   }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+  WiFiManager wm;  
+  WiFi.mode(WIFI_STA);   
 
   // Button2 Press on Startup Resets WiFi Settings and starts AP Mode
   Serial.printf("Button pins: BUTTON1PIN(%d)=%d BUTTON2PIN(%d)=%d\n",
@@ -1957,6 +1994,7 @@ void setup() {
     broker = broker_ext;
   }
   
+  setStage("setupmqtt");
   Serial.printf("Connect to MQTT at %s", broker.toString().c_str());
   Serial.println();
   client.setServer(broker, 1883);
@@ -1986,10 +2024,12 @@ void loop() {
   esp_task_wdt_reset();
 
   #ifdef INTERNAL_SHTC3
+  setStage("shtc3");
   updateInternalSensor();
   #endif
   
   // Scan for Sensors
+  setStage("scanstart");
   Serial.println("Start Scanning...");
   // non Blocking Scan
   pBLEScan->start(0,nullptr,false);
@@ -1997,8 +2037,10 @@ void loop() {
   while (millis() - startmillis < 60000 && millis() >= startmillis) {
     esp_task_wdt_reset();
     #ifdef WIFI
+    setStage("wifi");
     wifiCheck();
     #endif
+    setStage("mqttloop");             // hier laufen auch die MQTT-Callbacks
     client.loop();
     #ifdef MQTT
     if (configRequestPending && client.connected()) {
@@ -2007,12 +2049,16 @@ void loop() {
       client.publish(getconftopic.c_str(), msg.c_str());
     }
     #endif
+    setStage("buttons");
     serviceButtons();
+    setStage("display");
     serviceDisplay();
+    setStage("scan");
     // Nicht im Leerlauf durchdrehen: gibt die CPU frei (und senkt vermutlich
     // die Eigenerwaermung). 10 ms liegen weit unter der Tasten-Entprellzeit.
     delay(10);
   }
+  setStage("scanstop");
   pBLEScan->stop();
   Serial.println("Stop Scanning...");
 
@@ -2023,6 +2069,7 @@ void loop() {
   mqttWasConnected = client.connected();
   if (WiFi.status() == WL_CONNECTED) {
     if (!client.connected()) {
+      setStage("reconnect");
       mqttReconnect();
       mqttWasConnected = client.connected();
       if (client.connected()) {
@@ -2036,6 +2083,7 @@ void loop() {
      
       display_indicators(TFT_GREEN);
 
+      setStage("publish");
       // Kopie ziehen, damit der BLE-Task waehrend des Publish nicht wartet
       std::list<tempSensor> snapshot;
       { SensorsLock lock; snapshot = sensors; }
@@ -2083,6 +2131,7 @@ void loop() {
 
       // Lebenszeichen: Laufzeit und Heap. Ein stetig fallender Heap-Minimum
       // deutet auf ein Leck hin, das irgendwann zum Haenger fuehrt.
+      setStage("status");
       topic = debugtopic + "/status";
       msg = "Uptime=" + String(millis() / 1000) + "s Heap=" + String(ESP.getFreeHeap())
             + " MinHeap=" + String(ESP.getMinFreeHeap()) + " Reset=" + resetReasonText()
@@ -2097,7 +2146,9 @@ void loop() {
 
   // Erst nach dem Publish pruefen, damit openHAB die Werte schon hat.
   // Laeuft im Loop-Task: Publish, Ton und Display sind hier erlaubt.
+  setStage("alarms");
   checkAlarms();
 
+  setStage("stuckcheck");
   restartIfStuck();
 }
