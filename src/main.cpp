@@ -29,7 +29,7 @@
 #define WIFI
 #define MQTT
 bool DEBUG = false;
-String version = "V3.0";
+String version = "V3.1";
 
 #define CONFIG_ARDUINO_LOOP_STACK_SIZE 16384
 
@@ -307,6 +307,53 @@ volatile uint32_t lastAdvMs = 0;     // letztes BLE-Advertisement (beliebiges Ge
 // abhaengt, abonniert das Geraet sein eigenes Status-Topic (Echo ueber den
 // Broker); die Uhrzeit-Meldungen zaehlen ebenso.
 volatile uint32_t lastMqttOkMs = 0;
+
+// ---- Diagnose fuer den Debug-Tab von HomeControl (ab V3.1) ----
+// Grund eines eigenen Neustarts ueber den Reset hinweg merken (RTC-Speicher wird bei
+// ESP.restart() und Panic nicht geloescht) und mit der naechsten Startmeldung senden.
+#define RESTART_MAGIC 0xB1E5A1F0UL
+RTC_NOINIT_ATTR uint32_t restartMagic;
+RTC_NOINIT_ATTR char restartWhy[20];
+String restartReason = "";            // aus dem RTC-Speicher, nur in der ersten Startmeldung
+volatile int lastWifiReason = 0;      // SDK-Grund der letzten WLAN-Trennung, 0 = keine
+int lastMqttState = 99;               // client.state() beim letzten MQTT-Abbruch, 99 = keiner
+bool mqttWasConnected = false;
+
+// Aktive WLAN-Wiederherstellung: Der Core verbindet nach manchen Trennungsgruenden nicht
+// zuverlaessig selbst neu (2026-10-02: 15 min ohne WLAN, dann Neustart durch restartIfStuck).
+#ifndef WIFI_RECONNECT_S
+#define WIFI_RECONNECT_S 60           // so lange ohne WLAN -> WiFi.reconnect()
+#endif
+#ifndef WIFI_REBEGIN_S
+#define WIFI_REBEGIN_S 180            // so lange ohne WLAN -> Neuanmeldung (disconnect + begin)
+#endif
+uint32_t wifiDownSince = 0;           // 0 = verbunden
+uint32_t lastWifiAction = 0;
+
+static void markRestart(const char* why) {
+  strlcpy(restartWhy, why, sizeof(restartWhy));
+  restartMagic = RESTART_MAGIC;
+}
+
+static void wifiCheck() {
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiDownSince = 0;
+    return;
+  }
+  uint32_t now = millis();
+  if (wifiDownSince == 0) { wifiDownSince = now; lastWifiAction = now; return; }
+  uint32_t down = now - wifiDownSince;
+  if (now - lastWifiAction < WIFI_RECONNECT_S * 1000UL) return;
+  lastWifiAction = now;
+  if (down >= WIFI_REBEGIN_S * 1000UL) {
+    Serial.printf("WLAN seit %lus weg - Neuanmeldung\n", (unsigned long)(down / 1000));
+    WiFi.disconnect();
+    WiFi.begin();                       // gespeicherte Zugangsdaten (WiFiManager)
+  } else {
+    Serial.printf("WLAN seit %lus weg - reconnect\n", (unsigned long)(down / 1000));
+    WiFi.reconnect();
+  }
+}
 #ifdef C11
 std::__cxx11::string string_to_hex(const std::__cxx11::string& input, int length = 0)
 #else
@@ -1501,12 +1548,15 @@ static void restartIfStuck() {
   uint32_t mq  = lastMqttOkMs;
   uint32_t now = millis();
   const char* why = nullptr;
-  if (BLE_SILENT_RESTART_MIN > 0 && now - adv > BLE_SILENT_RESTART_MIN * 60000UL)
-    why = "keine BLE-Advertisements";
-  else if (MQTT_OFFLINE_RESTART_MIN > 0 && now - mq > MQTT_OFFLINE_RESTART_MIN * 60000UL)
-    why = "keine MQTT-Nachrichten";
+  const char* code = nullptr;           // geht mit der naechsten Startmeldung als Restart=<code> raus
+  if (BLE_SILENT_RESTART_MIN > 0 && now - adv > BLE_SILENT_RESTART_MIN * 60000UL) {
+    why = "keine BLE-Advertisements"; code = "BLE_SILENT";
+  } else if (MQTT_OFFLINE_RESTART_MIN > 0 && now - mq > MQTT_OFFLINE_RESTART_MIN * 60000UL) {
+    why = "keine MQTT-Nachrichten"; code = "MQTT_OFFLINE";
+  }
   if (!why) return;
   Serial.printf("Selbstueberwachung: %s - Neustart.\n", why);
+  markRestart(code);
   Serial.flush();
   delay(100);
   ESP.restart();
@@ -1577,16 +1627,19 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
   if (strcmp(topic,cmdtopic.c_str()) == 0) {
     if ( strcmp(spayload,"restart") == 0) {
+      markRestart("CMD");
       ESP.restart();
     }
 
     if ( strcmp(spayload,"getVersion") == 0 ) {
-      msg = "Version " + version;
+      msg = "Version " + version + ": RSSI=" + String(WiFi.RSSI());
       client.publish(conftopic.c_str() ,msg.c_str(), true);
     }
 
     if ( strcmp(spayload,"getIP") == 0 ) {
-      msg = "IP=" + ip.toString() + " SSID=" + ssid + " Broker=" + broker.toString();
+      // aktuelle IP: der Router vergibt nach einer Neuanmeldung mitunter eine andere
+      msg = "IP=" + WiFi.localIP().toString() + " SSID=" + ssid + " Broker=" + broker.toString()
+          + " RSSI=" + String(WiFi.RSSI());
       client.publish(conftopic.c_str() ,msg.c_str(), true);
     }
 
@@ -1659,6 +1712,9 @@ void mqttReconnect() {
     Serial.print("Attempting MQTT connection...");
     // Attempt to connect
     if (client.connect(client_id.c_str())) {
+      // Die Verbindung selbst ist ein Lebenszeichen: sonst startet restartIfStuck() direkt
+      // nach einer Wiederverbindung neu, wenn noch keine Nachricht verarbeitet wurde
+      lastMqttOkMs = millis();
       display_indicators(TFT_GREEN);
       Serial.println("connected..");
       client.subscribe(conftopic.c_str());
@@ -1667,7 +1723,12 @@ void mqttReconnect() {
       client.subscribe(datetopic.c_str());
       client.subscribe((debugtopic + "/status").c_str());   // Echo, s. lastMqttOkMs
       String msg = "Online " + version + ": SSID=" + ssid + " IP=" + WiFi.localIP().toString() + " Broker=" + broker.toString()
-                 + " Reset=" + resetReasonText() + " Uptime=" + String(millis() / 1000) + "s";
+                 + " Reset=" + resetReasonText() + " Uptime=" + String(millis() / 1000) + "s"
+                 + " RSSI=" + String(WiFi.RSSI());
+      // Gruende des letzten Abbruchs (nur wenn bekannt) und eines eigenen Neustarts
+      if (lastMqttState != 99) msg += " MQTTrc=" + String(lastMqttState);
+      if (lastWifiReason != 0) msg += " WiFiReason=" + String(lastWifiReason);
+      if (restartReason.length()) { msg += " Restart=" + restartReason; restartReason = ""; }
       client.publish(debugtopic.c_str(),msg.c_str(),true);
       display_indicators(TFT_DARKGREY);
     } else {
@@ -1804,6 +1865,14 @@ void setup() {
   espID = ESP.getEfuseMac();
   client_id = "ble2mqtt-" + mac2String((byte*) &espID);
 
+  // Grund eines eigenen Neustarts aus dem RTC-Speicher (nach Stromausfall: Zufallswerte -> Magic passt nicht)
+  if (restartMagic == RESTART_MAGIC) {
+    restartWhy[sizeof(restartWhy) - 1] = '\0';
+    restartReason = restartWhy;
+    Serial.printf("Letzter Neustart durch: %s\n", restartWhy);
+  }
+  restartMagic = 0;
+
   #ifdef INTERNAL_SHTC3
   // Braucht die ESP-ID, steht deshalb hier und nicht bei der Sensor-Init.
   if (internalSensorFound) {
@@ -1821,6 +1890,9 @@ void setup() {
   Serial.println("Creating WiFi Manager...");
   WiFiManager wm;  
   WiFi.mode(WIFI_STA);   
+  WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+    lastWifiReason = info.wifi_sta_disconnected.reason;
+  }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
 
   // Button2 Press on Startup Resets WiFi Settings and starts AP Mode
   Serial.printf("Button pins: BUTTON1PIN(%d)=%d BUTTON2PIN(%d)=%d\n",
@@ -1924,6 +1996,9 @@ void loop() {
   u_long startmillis = millis();
   while (millis() - startmillis < 60000 && millis() >= startmillis) {
     esp_task_wdt_reset();
+    #ifdef WIFI
+    wifiCheck();
+    #endif
     client.loop();
     #ifdef MQTT
     if (configRequestPending && client.connected()) {
@@ -1943,9 +2018,13 @@ void loop() {
 
   // Publsh Sensor Values to MQTT
   #ifdef MQTT
+  // Grund eines MQTT-Abbruchs merken, er geht mit der naechsten Startmeldung raus
+  if (mqttWasConnected && !client.connected()) lastMqttState = client.state();
+  mqttWasConnected = client.connected();
   if (WiFi.status() == WL_CONNECTED) {
     if (!client.connected()) {
       mqttReconnect();
+      mqttWasConnected = client.connected();
       if (client.connected()) {
         msg = "getconfig:"+client_id;
         client.publish(getconftopic.c_str(),msg.c_str());
@@ -2006,7 +2085,8 @@ void loop() {
       // deutet auf ein Leck hin, das irgendwann zum Haenger fuehrt.
       topic = debugtopic + "/status";
       msg = "Uptime=" + String(millis() / 1000) + "s Heap=" + String(ESP.getFreeHeap())
-            + " MinHeap=" + String(ESP.getMinFreeHeap()) + " Reset=" + resetReasonText();
+            + " MinHeap=" + String(ESP.getMinFreeHeap()) + " Reset=" + resetReasonText()
+            + " RSSI=" + String(WiFi.RSSI());
       client.publish(topic.c_str(), msg.c_str());
 
       display_indicators(TFT_DARKGREY);
